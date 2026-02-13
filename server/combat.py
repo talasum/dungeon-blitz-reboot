@@ -15,6 +15,7 @@ from globals import (
     record_dungeon_kill,
     get_npc_props,
     XP_CAP_PER_KILL,
+    send_pet_xp_update,
 )
 from level_config import LEVEL_CONFIG
 
@@ -355,6 +356,34 @@ def handle_power_hit(session, data):
 
                     # SAVE PROGRESS (Fixes reset bug)
                     save_characters(session.user_id, session.char_list)
+
+                # --- Pet XP from combat kill ---
+                if char:
+                    from pets import get_level_for_xp as get_pet_level_for_xp
+                    active_pet_info = char.get("activePet", {})
+                    pet_type_id = active_pet_info.get("typeID", 0)
+                    pet_special_id = active_pet_info.get("special_id", 0)
+
+                    if pet_type_id and pet_special_id:
+                        pets_list = char.get("pets", [])
+                        target_pet = next(
+                            (p for p in pets_list
+                             if p.get("typeID") == pet_type_id
+                             and p.get("special_id") == pet_special_id),
+                            None,
+                        )
+                        if target_pet:
+                            pet_xp = target_pet.get("xp", 0) + xp_amount
+                            target_pet["xp"] = pet_xp
+                            new_pet_level = get_pet_level_for_xp(pet_xp)
+                            target_pet["level"] = new_pet_level
+                            active_pet_info["xp"] = pet_xp
+                            active_pet_info["level"] = new_pet_level
+                            send_pet_xp_update(
+                                session, pet_type_id, pet_special_id,
+                                xp_amount, new_pet_level, False
+                            )
+                            save_characters(session.user_id, session.char_list)
                 
                 # Calculate HP gain for globe
                 # Small mobs (Minion) = 15% heal, Big mobs (Lieutenant/Boss) = 40% heal

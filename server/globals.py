@@ -562,7 +562,7 @@ def send_new_pet_packet(session, type_id, special_id, rank, suppress=False):
     print(f"[PET] Sent NEW PET : type={type_id}, special_id={special_id}, rank={rank}, suppress={suppress}")
 
 def send_pet_xp_update(session, pet_type_id, pet_special_id, xp_amount, new_level, is_rare_pet_food):
-    """Send pet XP update packet (0x38)
+    """Send pet XP update packet (0xf2 = PKTTYPE_PET_EXPERIENCE_UPDATE)
     
     Args:
         session: Player session
@@ -580,7 +580,7 @@ def send_pet_xp_update(session, pet_type_id, pet_special_id, xp_amount, new_leve
     bb.write_method_15(is_rare_pet_food)                # rare pet food flag
 
     body = bb.to_bytes()
-    pkt = struct.pack(">HH", 0x38, len(body)) + body
+    pkt = struct.pack(">HH", 0xf2, len(body)) + body
     session.conn.sendall(pkt)
 
     print(f"[PET XP] Sent pet XP update: type={pet_type_id}, special={pet_special_id}, xp={xp_amount}, level={new_level}, rare={is_rare_pet_food}")
