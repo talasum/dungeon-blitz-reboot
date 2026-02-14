@@ -16,7 +16,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 187998,
@@ -35,7 +36,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 253534,
@@ -54,7 +56,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 319070,
@@ -73,7 +76,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 384606,
@@ -211,7 +215,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 843358,
@@ -231,7 +236,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 908894,
@@ -251,7 +257,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 974430,
@@ -271,7 +278,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1039966,
@@ -291,7 +299,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1105502,
@@ -311,7 +320,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1171038,
@@ -331,7 +341,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1236574,
@@ -351,7 +362,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1302110,
@@ -371,7 +383,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1367646,
@@ -391,7 +404,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1433182,
@@ -411,7 +425,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1498718,
@@ -431,7 +446,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1564254,
@@ -451,7 +467,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1629790,
@@ -471,7 +488,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1695326,
@@ -491,7 +509,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 1760862,
@@ -571,7 +590,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 2023006,
@@ -591,7 +611,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 2088542,
@@ -611,7 +632,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 2154078,
@@ -671,7 +693,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 2350686,
@@ -791,7 +814,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 2743902,
@@ -831,7 +855,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 2874974,
@@ -851,7 +876,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 2940510,
@@ -871,7 +897,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3006046,
@@ -911,7 +938,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3137118,
@@ -931,7 +959,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3202654,
@@ -951,7 +980,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3268190,
@@ -1011,7 +1041,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3464798,
@@ -1031,7 +1062,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3530334,
@@ -1051,7 +1083,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3595870,
@@ -1071,7 +1104,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3661406,
@@ -1091,7 +1125,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3726942,
@@ -1111,7 +1146,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3792478,
@@ -1131,7 +1167,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3858014,
@@ -1171,7 +1208,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 3989086,
@@ -1231,7 +1269,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 4185694,
@@ -1251,7 +1290,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 4251230,
@@ -1271,7 +1311,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 4316766,
@@ -1291,7 +1332,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 4382302,
@@ -1311,7 +1353,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 4447838,
@@ -1331,7 +1374,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 4513374,
@@ -1351,7 +1395,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 4578910,
@@ -1511,7 +1556,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 5103198,
@@ -1531,7 +1577,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 5168734,
@@ -1551,7 +1598,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 5234270,
@@ -1571,7 +1619,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 5299806,
@@ -1591,7 +1640,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 5365342,
@@ -1611,7 +1661,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 5430878,
@@ -1631,7 +1682,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 5496414,
@@ -1731,7 +1783,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 5824094,
@@ -1751,7 +1804,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 5889630,
@@ -1771,7 +1825,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 5955166,
@@ -1791,7 +1846,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 6020702,
@@ -1811,7 +1867,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 6086238,
@@ -1831,7 +1888,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 6151774,
@@ -1851,7 +1909,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 6217310,
@@ -1871,7 +1930,8 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   },
   {
     "id": 6282846,
@@ -1891,6 +1951,7 @@
     "entState": 0,
     "facing_left": false,
     "health_delta": 0,
-    "buffs": []
+    "buffs": [],
+    "noJumpAttack": true
   }
 ]

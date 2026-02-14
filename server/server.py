@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import secrets
 import socket
+import struct
 import sys
 import threading
+import traceback
 import time
 
 from PKTTYPES import PACKET_HANDLERS
@@ -260,6 +262,7 @@ def handle_client(session: ClientSession):
 
     except Exception as e:
         print("Session error:", e)
+        traceback.print_exc()
     finally:
         print("Disconnect:", addr)
         session.stop()

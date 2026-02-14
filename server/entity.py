@@ -101,15 +101,9 @@ def load_npc_data_for_level(level_name: str) -> list:
         with open(json_path, 'r') as file:
             data = json.load(file)
 
-        # Filter out hostile enemies (team 2) for tutorial levels only
-        # Other dungeons use server-side AI (enabled in ai_logic.py)
-        CLIENT_AI_LEVELS = (
-            "TutorialDungeon", 
-            "TutorialBoat",
-        )
-        if level_name in CLIENT_AI_LEVELS:
-            data = [npc for npc in data if npc.get("team") != 2]
-
+        # Filter out hostile enemies (team 2) globally.
+        # This removes all server-spawned enemies, forcing the client to use its own cue spawns.
+        data = [npc for npc in data if npc.get("team") != 2]
 
         return data
     except (FileNotFoundError, json.JSONDecodeError) as e:
@@ -120,6 +114,13 @@ def Send_Entity_Data(entity: Dict[str, Any]) -> bytes:
     bb = BitBuffer(debug=True)
     bb.write_method_4(entity['id'])
     bb.write_method_13(entity['name'])
+    
+    # Log entity being sent
+    has_no_jump = entity.get("noJumpAttack", False)
+    ent_name = entity.get('name', 'Unknown')
+    if has_no_jump:
+        print(f"[Entity Send] {ent_name} (ID: {entity['id']}) with noJumpAttack=True")
+    
     if entity.get("is_player", False):
         bb.write_method_6(1, 1)
         bb.write_method_13(entity.get("class", ""))
@@ -228,6 +229,10 @@ def Send_Entity_Data(entity: Dict[str, Any]) -> bytes:
 
     bb.write_method_6(entity.get("entState", 0), Entity.const_316)
     bb.write_method_6(1 if entity.get("facing_left", False) else 0, 1)
+    
+    # Send noJumpAttack flag for monsters to prevent jumping during attacks
+    bb.write_method_6(1 if entity.get("noJumpAttack", False) else 0, 1)
+    
     if entity.get('is_player', False):
 
         level = entity.get("level", 0)
@@ -403,6 +408,8 @@ def handle_entity_full_update(session, data):
     br = BitReader(data[4:])
 
     entity_id = br.read_method_9()
+    if session.current_level == "BridgeTown":
+        print(f"[{session.addr}] [PKT08] Entity update from client, ID={entity_id} (len={len(data)})")
     pos_x = br.read_method_24()
     pos_y = br.read_method_24()
     velocity_x = br.read_method_24()
@@ -448,6 +455,7 @@ def handle_entity_full_update(session, data):
         "pos_y": pos_y,
         "velocity_x": velocity_x,
         "ent_name": ent_name,
+        "name": ent_name,
         "team": team,
         "is_player": is_player,
         "render_depth_offset": y_offset,
@@ -466,8 +474,25 @@ def handle_entity_full_update(session, data):
     is_new_entity = entity_id not in session.entities
 
     # Update server-side map
-    session.entities[entity_id] = props
+    ent_name = props.get("name", f"Entity_{entity_id}")
+    
+    if not is_player:
+        print(f"[{session.addr}] [PKT08] Client-spawn NPC detected in {session.current_level}: {ent_name} ({entity_id})")
+        
+        # Check if Boss to trigger UI
+        from game_data import get_ent_type
+        from globals import send_room_boss_info
+        
+        ety = get_ent_type(ent_name)
+        if ety:
+            rank = ety.get("EntRank")
+            # Trigger for Bosses (and maybe MiniBosses if desired, but user said Boss level)
+            if rank == "Boss":
+                # Send EntName (Internal ID) so client can find the asset/head icon.
+                # Sending DisplayName ("The Great Pumpkin") likely fails asset lookup -> 0x0 Bitmap -> Crash #2015
+                send_room_boss_info(session, entity_id, ent_name)
 
+    session.entities[entity_id] = props
     level = session.current_level
     level_map = GS.level_entities.setdefault(level, {})
 
@@ -501,6 +526,7 @@ def handle_entity_full_update(session, data):
             "facing_left": b_left,
             "health_delta": 0,
             "buffs": [],
+            "client_spawned": not is_player,
         },
     }
 
@@ -569,19 +595,42 @@ def handle_entity_full_update(session, data):
                     other.conn.sendall(framed)
                     #print(f"[JOIN] Broadcasted Send_Entity_Data for {ent_dict['name']} → {other.addr}")
 
-def ensure_level_npcs(level_name: str) -> None:
-    if level_name in GS.level_entities:
-        return
-
-    npcs = load_npc_data_for_level(level_name)
+def ensure_level_npcs(level_name: str, force_reload: bool = False) -> None:
     try:
         from level_config import is_dungeon_level  # local import to avoid circulars
     except Exception:
         is_dungeon_level = lambda _: False
 
-    if is_dungeon_level(level_name):
+    if level_name in GS.level_entities and not force_reload:
+        # Level already loaded — just reset dungeon tracker if needed
+        if is_dungeon_level(level_name):
+            level_map = GS.level_entities[level_name]
+            total_enemies = sum(
+                1 for ent in level_map.values()
+                if ent.get("kind") == "npc" and ent.get("props", {}).get("team") == 2
+            )
+            init_dungeon_run(level_name, total_enemies)
+            # Reset rewards_granted + HP on all enemies so they can be re-killed
+            for ent in level_map.values():
+                props = ent.get("props", {})
+                if props.get("team") == 2:
+                    props.pop("rewards_granted", None)
+                    props.pop("hp", None)
+        return
+    if force_reload and level_name in GS.level_entities:
+        del GS.level_entities[level_name]
+
+    npcs = load_npc_data_for_level(level_name)
+
+    if is_dungeon_level(level_name) and level_name != "CraftTown":
         total_enemies = sum(1 for npc in npcs if npc.get("team") == 2)
-        init_dungeon_run(level_name, total_enemies)
+        if total_enemies > 0:
+            init_dungeon_run(level_name, total_enemies)
+            # Fresh run: reset kill tracking to avoid stale progress when re-entering
+            run = GS.dungeon_runs.get(level_name)
+            if run:
+                run["killed_ids"] = set()
+                run["last_reset"] = time.time()
 
     level_map = GS.level_entities.setdefault(level_name, {})
 

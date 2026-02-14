@@ -167,6 +167,24 @@ def handle_entity_destroy(session, data):
         ):
             other.conn.sendall(data)
 
+    # Tutorial Dungeon: Chains Destruction Trigger
+    if session.current_level == "TutorialDungeon":
+        # Chains02 (ID: 3268190) - First Room
+        if entity_id == 3268190:
+             print(f"[{session.addr}] [Tutorial] Chains02 (Start) destroyed. Script should start.")
+             
+        # Chains03 (ID: 4054622) - Boss Room
+        elif entity_id == 4054622: 
+            print(f"[{session.addr}] [Tutorial] Chains03 (End) destroyed. Triggering Anna Cinematic...")
+            # Trigger cinematic on NPC Anna (ID: 3858014)
+            from globals import build_start_skit_packet
+            pkt = build_start_skit_packet(3858014, dialogue_id=2, mission_id=101)
+            session.conn.sendall(pkt)
+            
+            # Backup: Trigger on Parrot (ID: 3333726)
+            pkt2 = build_start_skit_packet(3333726, dialogue_id=2, mission_id=101)
+            session.conn.sendall(pkt2)
+
 def handle_buff_tick_dot(session, data):
     br = BitReader(data[4:])
     target_id = br.read_method_9()
@@ -267,7 +285,7 @@ def handle_power_hit(session, data):
     # --- Server-Side Drop Logic ---
     from Commands import process_drop_reward
     from game_data import calculate_npc_gold, calculate_npc_exp, get_ent_type, get_random_material_for_realm
-    from game_data import calculate_npc_hp, calculate_npc_gold, get_ent_type, calculate_drop_data, get_gear_id_for_entity
+    from game_data import calculate_npc_hp, calculate_npc_gold, get_ent_type, calculate_drop_data, get_gear_id_for_entity, get_random_gear_id
     from player_stats import calculate_find_bonuses, get_modified_gold, get_modified_drop_chance
     import random
 
@@ -281,11 +299,22 @@ def handle_power_hit(session, data):
     elif level:
         target = get_npc_props(level, target_entity_id)
 
+    if not target:
+        # Client-side entity (not tracked by server).
+        # We MUST NOT return early, or the client won't receive the echo packet 
+        # (which it might need for confirming the hit/projectile).
+        # We just skip server-side HP tracking and loot logic for this entity.
+        # print(f"[Combat] Target {target_entity_id} unknown - treating as client-side entity (broadcasting only).")
+        pass
+    
     if target:
         ent_name = target.get("name")
+        ent_type_for_behavior = get_ent_type(ent_name) if ent_name else None
+        behavior_name = ent_type_for_behavior.get("Behavior", "") if ent_type_for_behavior else ""
+        is_treasure_chest = behavior_name == "TreasureChest" or (ent_name or "").startswith("TreasureChest")
         # Initialize HP if missing (Authoritative fallback)
         if "hp" not in target:
-            # Special initializtion for player from session metadata
+            # Special initialization for player from session metadata
             if target_entity_id == session.clientEntID and hasattr(session, "authoritative_max_hp"):
                 max_hp = session.authoritative_max_hp
                 target["hp"] = max_hp
@@ -293,58 +322,102 @@ def handle_power_hit(session, data):
                 target["level"] = session.current_char_dict.get("level", 1)
                 target["rewards_granted"] = False
             else:
-                # Get EntType data for level and scalars
                 ent_type_data = get_ent_type(ent_name) if ent_name else None
-                # Fix: Handle client-spawned entities not in EntTypes.json
                 if ent_type_data is None:
                     ent_type_data = {}
                 npc_level = int(ent_type_data.get("Level", "1"))
                 
                 max_hp = calculate_npc_hp(ent_name, npc_level)
+                # Treasure chests in data can resolve to 0 HP (Level 0 + tiny HitPoints scalar),
+                # but they should still break on hit and always drop gold.
+                if is_treasure_chest and max_hp <= 0:
+                    max_hp = 1
                 target["hp"] = max_hp
                 target["max_hp"] = max_hp
                 target["level"] = npc_level
                 target["rewards_granted"] = False
         
         current_hp = target["hp"]
+        # NPC can be alive again while an old rewards flag is still set (respawned without full reset).
+        if current_hp > 0 and target.get("rewards_granted", False):
+            target["rewards_granted"] = False
+        # If a chest was spawned/loaded with 0 HP, treat the first incoming hit as lethal.
+        if is_treasure_chest and current_hp <= 0 and not target.get("rewards_granted", False):
+            current_hp = 1
         new_hp = current_hp - damage_value
         target["hp"] = new_hp
+    else:
+        # Unknown target (Client-side mob), skip server HP logic
+        current_hp = 100
+        new_hp = 100 - damage_value
+        ent_name = "Unknown"
 
         # print(f"[Combat] Entity {target_entity_id} HP: {current_hp} -> {new_hp}")
 
-        # Trigger reward ONLY on lethal damage and if not already granted
-        if new_hp <= 0 and current_hp > 0 and not target.get("rewards_granted", False):
-            # Verify it's an enemy (not player/pet/neutral)
-            team = target.get("team", 0)
-            if team == 2 or (not target.get("is_player", False) and team != 1 and team != 3):
-                target["rewards_granted"] = True
-                target["hp"] = 0
-                
-                # Track dungeon kill progress
+    ent_name = target.get("name") if target else "Unknown"
+    # Trigger reward ONLY on lethal damage and if not already granted
+    # NOTE: target is None for client-spawned mobs — rewards for those go through
+    # handle_grant_reward in Commands.py, so we skip this block entirely.
+    if target and new_hp <= 0 and current_hp > 0 and not target.get("rewards_granted", False):
+        # Verify it's an enemy (not player/pet/neutral)
+        team = target.get("team", 0)
+        # print(f"[Combat] Lethal Hit {ent_name} (Team={team})")
+        if team == 2 or (not target.get("is_player", False) and team != 1 and team != 3):
+            # Ensure the attacker is this player's entity/pet to avoid stray XP awards
+            attacker = session.entities.get(source_entity_id)
+            if not attacker:
+                 # It's possible attacker is another player or external source?
+                 # But we usually only process local session packets for local hits?
+                 # Actually handle_power_hit comes from Client A. source_entity_id must be known to Client A.
+                 pass
+            
+            # Allow lenient attacker check for debugging if needed, but standard logic requires it.
+            if not attacker or attacker.get("team") not in (0, 1) and not attacker.get("is_player", False):
+                print(f"[Combat] Lethal ignored: Attacker {source_entity_id} invalid/wrong team")
+                return
+            target["rewards_granted"] = True
+            target["hp"] = 0
+            target["death_count"] = int(target.get("death_count", 0)) + 1
+            death_count = target["death_count"]
+
+            # Track dungeon kill progress
+            progress = None
+            if not is_treasure_chest:
                 progress = record_dungeon_kill(level, target_entity_id)
-                if progress:
-                    for s in GS.all_sessions:
-                        if s.player_spawned and s.current_level == level:
-                            send_quest_progress(s, progress["percent"])
-                            if s.current_char_dict:
-                                s.current_char_dict["questTrackerState"] = progress["percent"]
-                
-                npc_level = target.get("level", 1)
-                
-                # Calculate player's find bonuses from equipped charm runes
-                char = session.current_char_dict
-                find_bonuses = calculate_find_bonuses(char) if char else {"gold_find": 0, "item_find": 0, "craft_find": 0}
-                
-                # Apply gold find bonus
-                base_gold = calculate_npc_gold(ent_name, npc_level)
-                gold_amount = get_modified_gold(base_gold, find_bonuses.get("gold_find", 0))
-                xp_amount = calculate_npc_exp(ent_name, npc_level)
-                if xp_amount > XP_CAP_PER_KILL:
-                    print(f"[Combat] XP capped for {ent_name}: {xp_amount} -> {XP_CAP_PER_KILL}")
-                    xp_amount = XP_CAP_PER_KILL
-                
-                # Send XP reward immediately
+            if progress:
+                for s in GS.all_sessions:
+                    if s.player_spawned and s.current_level == level:
+                        send_quest_progress(s, progress["percent"])
+                        if s.current_char_dict:
+                            s.current_char_dict["questTrackerState"] = progress["percent"]
+            
+            npc_level = target.get("level", 1)
+            
+            # Calculate player's find bonuses from equipped charm runes
+            char = session.current_char_dict
+            find_bonuses = calculate_find_bonuses(char) if char else {"gold_find": 0, "item_find": 0, "craft_find": 0}
+            
+            # Apply gold find bonus
+            base_gold = calculate_npc_gold(ent_name, npc_level)
+            # TreasureChest entities always drop big gold and are loot-only.
+            if is_treasure_chest:
+                player_level = char.get("level", 1) if char else 1
+                base_gold = 500 + (player_level * 20) + random.randint(0, 500)
+            gold_amount = get_modified_gold(base_gold, find_bonuses.get("gold_find", 0))
+            xp_amount = 0 if is_treasure_chest else calculate_npc_exp(ent_name, npc_level)
+            if xp_amount > XP_CAP_PER_KILL:
+                print(f"[Combat] XP capped for {ent_name}: {xp_amount} -> {XP_CAP_PER_KILL}")
+                xp_amount = XP_CAP_PER_KILL
+            
+            # Send XP reward immediately
+            if xp_amount > 0:
                 send_xp_reward(session, xp_amount)
+            
+            # Add XP to character and check for level up
+            char = session.current_char_dict
+            if char and xp_amount > 0:
+                current_xp = char.get("xp", 0) + xp_amount
+                char["xp"] = current_xp
                 
                 # Add XP to character and check for level up
                 # Add XP to character and check for level up
@@ -370,7 +443,7 @@ def handle_power_hit(session, data):
                 # --- Pet XP from combat kill ---
                 if char:
                     from pets import get_level_for_xp as get_pet_level_for_xp
-                    active_pet_info = char.get("activePet", {})
+                    active_pet_info = char.get("activePet") or {}
                     pet_type_id = active_pet_info.get("typeID", 0)
                     pet_special_id = active_pet_info.get("special_id", 0)
 
@@ -406,54 +479,80 @@ def handle_power_hit(session, data):
                 hp_percent = 0.4 if rank in ["Lieutenant", "Boss", "MiniBoss"] else 0.15
                 hp_gain = int(player_max_hp * hp_percent)
                 
-                # Get material drop based on enemy's Realm
-                ent_type_data = get_ent_type(ent_name)
-                realm = ent_type_data.get("Realm", "") if ent_type_data else ""
-                material_id = None
-                
-                # Check if current level is a dungeon
-                # LEVEL_CONFIG[name] = (swf, map_id, base_id, is_dungeon)
-                is_dungeon = LEVEL_CONFIG.get(level, ("", 0, 0, False))[3]
+                print(f"[Combat] {char.get('name', 'Player')} gained {xp_amount} XP (Total: {current_xp})")
 
-                # Apply craft find bonus to material drop chance
-                base_material_chance = 0.3  # 30% base chance
-                material_chance = get_modified_drop_chance(base_material_chance, find_bonuses.get("craft_find", 0))
-                if is_dungeon and realm and random.random() < material_chance:
-                    material_id = get_random_material_for_realm(realm)
+                save_characters(session.user_id, session.char_list)
+            
+            # Calculate HP gain for globe
+            player_max_hp = getattr(session, "authoritative_max_hp", 100)
+            ent_type_for_rank = get_ent_type(ent_name)
+            rank = ent_type_for_rank.get("EntRank", "Minion") if ent_type_for_rank else "Minion"
+            
+            hp_percent = 0.4 if rank in ["Lieutenant", "Boss", "MiniBoss"] else 0.15
+            hp_gain = 0 if is_treasure_chest else int(player_max_hp * hp_percent)
+            
+            # Get material drop based on enemy's Realm
+            ent_type_data = get_ent_type(ent_name)
+            realm = ent_type_data.get("Realm", "") if ent_type_data else ""
+            material_id = None
+            
+            # Check if current level is a dungeon
+            # LEVEL_CONFIG[name] = (swf, map_id, base_id, is_dungeon)
+            is_dungeon = LEVEL_CONFIG.get(level, ("", 0, 0, False))[3]
 
-                # Calculate drops based on difficulty tiers with item find bonus
-                specific_gear_id = None
-                if is_dungeon:
-                    should_drop_gear, gear_tier = calculate_drop_data(ent_name, npc_level, rank, find_bonuses.get("item_find", 0))
-                    if should_drop_gear:
-                        specific_gear_id = get_gear_id_for_entity(ent_name)
-                        if not specific_gear_id:
-                            # If no valid drops for this specific enemy/realm, cancel the gear drop
-                            should_drop_gear = False
-                else:
-                    should_drop_gear, gear_tier = False, 0
+            # Apply craft find bonus to material drop chance
+            base_material_chance = 0.3  # 30% base chance
+            material_chance = get_modified_drop_chance(base_material_chance, find_bonuses.get("craft_find", 0))
+            if not is_treasure_chest and is_dungeon and realm and random.random() < material_chance:
+                material_id = get_random_material_for_realm(realm)
 
-                if random.random() < 0.9: 
-                    death_x = int(round(target.get("pos_x", target.get("x", 0))))
-                    death_y = int(round(target.get("pos_y", target.get("y", 0))))
-                    process_drop_reward(
-                        session, 
-                        death_x, 
-                        death_y, 
-                        gold=gold_amount, 
-                        hp_gain=hp_gain, 
-                        drop_gear=should_drop_gear,
-                        gear_tier=gear_tier,
-                        material_id=material_id,
-                        target_id=target_entity_id,
-                        specific_gear_id=specific_gear_id
-                    )
-                print(f"[Combat] Lethal on {ent_name} ({rank}, Realm={realm}). Dropping {gold_amount} Gold, {hp_gain} HP, XP={xp_amount}, Material={material_id}.")
+            # Calculate drops based on difficulty tiers with item find bonus
+            specific_gear_id = None
+            if is_treasure_chest:
+                should_drop_gear, gear_tier = False, 0
+            elif is_dungeon:
+                should_drop_gear, gear_tier = calculate_drop_data(ent_name, npc_level, rank, find_bonuses.get("item_find", 0))
+                if should_drop_gear:
+                    specific_gear_id = get_gear_id_for_entity(ent_name)
+                    if not specific_gear_id:
+                        # Fall back to class-specific random gear
+                        player_class = (char.get("class") or "").title() if char else None
+                        specific_gear_id = get_random_gear_id(player_class)
+                    if not specific_gear_id:
+                        should_drop_gear = False
+            else:
+                should_drop_gear, gear_tier = False, 0
+
+            # Spawn loot drops for both dungeon and non-dungeon kills
+            death_x = int(round(target.get("pos_x", target.get("x", 0))))
+            death_y = int(round(target.get("pos_y", target.get("y", 0))))
+            process_drop_reward(
+                session,
+                death_x,
+                death_y,
+                gold=gold_amount,
+                hp_gain=hp_gain,
+                drop_gear=should_drop_gear,
+                gear_tier=gear_tier,
+                material_id=material_id,
+                target_id=target_entity_id,
+                specific_gear_id=specific_gear_id,
+                reward_nonce=death_count,
+            )
+            print(f"[Combat] Lethal on {ent_name} ({rank}, Realm={realm}). Dropping {gold_amount} Gold, {hp_gain} HP, XP={xp_amount}, Material={material_id}.")
+
+            # Tutorial Dungeon Special Logic: Destroy Chains immediately on death
+            if session.current_level == "TutorialDungeon" and target_entity_id in [3268190, 4054622]:
+                print(f"[Combat] Tutorial Chains {target_entity_id} destroyed! Forcing server-side removal.")
+                # Force instant destruction so client sees them vanish/defeated
+                # This triggers handle_entity_destroy -> triggers StartSkit (for Chains03)
+                handle_entity_destroy_server(session, target_entity_id, GS.all_sessions)
 
     # If the target is a player, send an authoritative HP update (0x3A).
     # Some client flows ignore HP loss in the raw 0x0A hit packet for self.
     target_player_session = None
     if target and target.get("is_player", False):
+        # Find the session for this player entity
         if target.get("id") == session.clientEntID:
             target_player_session = session
         else:
@@ -461,9 +560,11 @@ def handle_power_hit(session, data):
                 if s.clientEntID == target.get("id"):
                     target_player_session = s
                     break
-
-    if target_player_session and target:
-        send_hp_update(target_player_session, target.get("id"), -damage_value)
+    
+    if target_player_session:
+         # Send actual HP loss (negative delta)
+         # Note: damage_value is positive, so we send -damage_value
+         send_hp_update(target_player_session, target.get("id"), -damage_value)
 
     # Forward packet unchanged to other clients in same level
     # If using Client-Side AI (player sends hit for enemy), we must echo it back to the player 

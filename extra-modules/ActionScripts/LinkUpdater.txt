@@ -3523,6 +3523,7 @@ package
          _loc32_ = 0;
          _loc33_ = param1.method_6(Entity.const_316);
          _loc34_ = param1.method_11();
+         var _loc98_:Boolean = param1.method_11();
          _loc36_ = "";
          _loc37_ = new class_118(this.var_1);
          if(_loc12_ == Entity.PLAYER)
@@ -3584,6 +3585,7 @@ package
          _loc46_.bUntargetable = _loc15_;
          _loc46_.var_1958 = _loc26_;
          _loc46_.var_1879 = _loc27_;
+         _loc46_.bNoJumpAttack = _loc98_;
          if(_loc12_ != Entity.PLAYER)
          {
             _loc46_.method_511(_loc9_);

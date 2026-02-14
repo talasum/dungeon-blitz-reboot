@@ -690,6 +690,8 @@ package
       
       internal var bBackpedal:Boolean = false;
       
+      internal var bNoJumpAttack:Boolean = false;
+      
       internal var var_1787:Number;
       
       internal var var_687:Boolean = false;
@@ -5896,6 +5898,10 @@ package
       
       private function method_1151() : Boolean
       {
+         if(this.bNoJumpAttack)
+         {
+            return false;
+         }
          if(this.combatState && this.combatState.mActivePower && this.combatState.mActivePower.powerType.basePowerName == "LeapStrike")
          {
             return false;

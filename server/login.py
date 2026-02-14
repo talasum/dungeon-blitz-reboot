@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 import struct
+import threading
 import time
 
 from Character import build_login_character_list_bitpacked
@@ -13,10 +14,84 @@ from ai_logic import AI_ENABLED, ensure_ai_loop, run_ai_loop
 from bitreader import BitReader
 from constants import EntType, load_class_template
 from entity import Send_Entity_Data, ensure_level_npcs, normalize_entity_for_send
-from globals import SECRET, _level_add, all_sessions, GS, HOST, PORTS, send_quest_progress
+from globals import SECRET, _level_add, all_sessions, GS, HOST, PORTS, send_quest_progress, reset_dungeon_run, init_dungeon_run
 from level_config import LEVEL_CONFIG, get_spawn_coordinates
 from socials import get_group_for_session, online_group_members, update_session_group_cache, build_group_update_packet
 
+# Keep empty in production so dungeon NPCs are server-spawned and obey
+# server-side movement/combat flags (including no-jump attack behavior).
+CLIENT_SPAWN_NPC_LEVELS = {
+    "CraftTown",
+    "NewbieRoad", "NewbieRoadHard",
+    "SwampRoadNorth", "SwampRoadNorthHard",
+    "SwampRoadConnection", "SwampRoadConnectionHard",
+    "BridgeTown", "BridgeTownHard",
+    "CemeteryHill", "CemeteryHillHard",
+    "OldMineMountain", "OldMineMountainHard",
+    "EmeraldGlades", "EmeraldGladesHard",
+    "Castle", "CastleHard",
+    "ShazariDesert", "ShazariDesertHard",
+    "JadeCity", "JadeCityHard"
+}
+CLIENT_SPAWN_FALLBACK_SEC = 5.0
+
+def should_client_spawn_npcs(level_name: str, is_dev_client: bool) -> bool:
+    if is_dev_client:
+        return True
+    return level_name in CLIENT_SPAWN_NPC_LEVELS
+
+def _is_dungeon_level_for_runtime(level_name: str) -> bool:
+    level_config = LEVEL_CONFIG.get(level_name, ("", 0, 0, False))
+    return level_config[3] and level_name != "CraftTown"
+
+def _spawn_server_level_npcs_for_session(session, force_reload: bool):
+    ensure_level_npcs(session.current_level, force_reload=force_reload)
+
+    if _is_dungeon_level_for_runtime(session.current_level):
+        reset_dungeon_run(session.current_level)
+
+    run = GS.dungeon_runs.get(session.current_level)
+    if run:
+        kills = len(run.get("killed_ids", []))
+        total = run.get("total", 0)
+        percent = min(100, int((kills * 100) / total)) if total else 0
+        if kills == 0:
+            percent = 0
+        session.current_char_dict["questTrackerState"] = percent
+        send_quest_progress(session, percent)
+
+    level_map = GS.level_entities.get(session.current_level, {})
+    npcs = [
+        ent["props"]
+        for ent in level_map.values()
+        if ent["kind"] == "npc"
+    ]
+    for npc in npcs:
+        flat_npc = normalize_entity_for_send(npc)
+        payload = Send_Entity_Data(flat_npc)
+        session.conn.sendall(
+            struct.pack(">HH", 0x0F, len(payload)) + payload
+        )
+        session.entities[npc["id"]] = npc
+
+def _start_client_spawn_fallback(session, force_reload: bool):
+    level_name = session.current_level
+
+    def _worker():
+        time.sleep(CLIENT_SPAWN_FALLBACK_SEC)
+        if not getattr(session, "running", False):
+            return
+        if session.current_level != level_name:
+            return
+        if getattr(session, "client_spawn_confirmed", False):
+            return
+
+        print(f"[Login] No client NPC spawn packets detected for {level_name}; falling back to server NPC spawns.")
+        _spawn_server_level_npcs_for_session(session, force_reload=force_reload)
+        if AI_ENABLED:
+            ensure_ai_loop(level_name, run_ai_loop)
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 def _purge_same_character_ghosts(active_session, user_id, char_name):
     for level_name, level_map in list(GS.level_entities.items()):
@@ -369,34 +444,35 @@ def handle_gameserver_login(session, data):
 
     #print(f"[{session.addr}] Welcome: {char['name']} (token {token})")
 
-    if AI_ENABLED:
+    use_client_spawn_npcs = should_client_spawn_npcs(session.current_level, is_dev_client)
+    print(f"[DEBUG] Level='{session.current_level}', Dev={is_dev_client} -> UseClientSpawn={use_client_spawn_npcs}")
+    if not use_client_spawn_npcs and session.current_level == "OldMineMountain":
+         print(f"[DEBUG] '{session.current_level}' NOT found in {CLIENT_SPAWN_NPC_LEVELS}")
+
+    session.client_spawn_confirmed = False
+
+    if AI_ENABLED and not use_client_spawn_npcs:
         ensure_ai_loop(session.current_level, run_ai_loop)
+    elif AI_ENABLED:
+        print(f"[Login] Client-spawn NPC mode enabled for {session.current_level}; skipping server AI loop.")
     else:
         pass
 
-    # developer client will spawn its own npcs server does not need to send any
-    if is_dev_client:
-        print("Developer Client Detected skipping server spawned npcs ")
-    else:
-        ensure_level_npcs(session.current_level)
-        run = GS.dungeon_runs.get(session.current_level)
-        if run:
-            kills = len(run.get("killed_ids", []))
-            total = run.get("total", 0)
-            percent = min(100, int((kills * 100) / total)) if total else 0
-            session.current_char_dict["questTrackerState"] = percent
-            send_quest_progress(session, percent)
+    # Clear per-session dedupe so loot/XP work on every zone entry
+    session.processed_reward_sources = set()
+    session.granted_xp_targets = set()
 
-        level_map = GS.level_entities.get(session.current_level, {})
-        npcs = [
-            ent["props"]
-            for ent in level_map.values()
-            if ent["kind"] == "npc"
-        ]
-        for npc in npcs:
-            flat_npc = normalize_entity_for_send(npc)
-            payload = Send_Entity_Data(flat_npc)
-            session.conn.sendall(
-                struct.pack(">HH", 0x0F, len(payload)) + payload
-            )
-            session.entities[npc["id"]] = npc
+    # Client-spawn mode (dev client or explicit level override)
+    if use_client_spawn_npcs:
+        print(f"[Login] Skipping server NPC spawn for {session.current_level} (client-spawn mode).")
+        is_dungeon_level = _is_dungeon_level_for_runtime(session.current_level)
+        if is_dungeon_level:
+            # Client will spawn NPCs; start tracker at 0 and let kills recompute totals from live entities.
+            init_dungeon_run(session.current_level, 0)
+            session.current_char_dict["questTrackerState"] = 0
+            send_quest_progress(session, 0)
+        # Some clients may not emit NPC 0x08 spawns for this map in non-dev mode.
+        # Fallback keeps the dungeon playable instead of leaving it empty.
+        _start_client_spawn_fallback(session, force_reload=is_dungeon)
+    else:
+        _spawn_server_level_npcs_for_session(session, force_reload=is_dungeon)

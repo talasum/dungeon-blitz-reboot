@@ -105,7 +105,7 @@ def handle_set_level_complete(session, data):
     # Calculate actual kills using authoritative server dungeon tracker when available
     run = GS.dungeon_runs.get(session.current_level)
     if run:
-        actual_kills = len(run.get("killed_ids", []))
+        actual_kills = run.get("killed", 0)
     else:
         # Fallback to client-reported values
         actual_kills = pkt_required_kills - pkt_remaining_kills
@@ -193,41 +193,45 @@ def handle_pickup_lootdrop(session, data):
         save_needed = False
 
         if "gold" in loot:
-            amount = loot["gold"]
-            char["gold"] += amount
-            send_gold_reward(session, amount)
+            amount = int(loot.get("gold", 0))
+            current_gold = int(char.get("gold", 0))
+            char["gold"] = current_gold + amount
+            # Use visible pickup mode to ensure the client applies the increment immediately.
+            send_gold_reward(session, amount, suppress=False)
             save_needed = True
-            print(f"[Loot] {char['name']} picked up {amount} Gold.")
+            print(f"[Loot] {char['name']} picked up {amount} Gold. Total now {char['gold']}.")
 
         if "health" in loot:
             hp_gain = loot["health"]
             # Update entity HP
             ent = session.entities.get(session.clientEntID)
             
-            # Use session-based max_hp if available
-            # If not yet synced (authoritative_max_hp is None), we skip clamping to avoid false "Full" reports
+            # Determine max HP: prefer session-based authoritative, fallback to entity data or 100
             max_hp = getattr(session, "authoritative_max_hp", None)
             
             if ent:
                 current_hp = ent.get("hp", 100)
                 
-                # Check if already at max HP (only if we have authoritative max_hp)
-                if max_hp is not None:
-                    ent["max_hp"] = max_hp # Keep entity in sync
-                    if current_hp >= max_hp:
-                        print(f"[Loot] {char['name']} picked up health globe but HP is full (HP: {current_hp}/{max_hp}).")
-                        return # Don't consume or heal if full
-                else:
-                    # If we don't have max_hp yet, assume not full (or use a huge fallback)
-                    print(f"[Loot] {char['name']} picked up health globe (MaxHP sync pending).")
+                # If authoritative_max_hp not yet synced, use entity's stored max_hp
+                if max_hp is None:
+                    max_hp = ent.get("max_hp", 100)
+                    print(f"[Loot] {char['name']} picked up health globe (using entity max_hp={max_hp}).")
+                
+                ent["max_hp"] = max_hp  # Keep entity in sync
+                
+                # Check if already at max HP
+                if current_hp >= max_hp:
+                    print(f"[Loot] {char['name']} picked up health globe but HP is full (HP: {current_hp}/{max_hp}).")
+                    return # Don't consume or heal if full
 
-                new_hp = (min(max_hp, current_hp + hp_gain)) if max_hp else (current_hp + hp_gain)
+                # Always clamp to max HP
+                new_hp = min(max_hp, current_hp + hp_gain)
                 actual_gain = new_hp - current_hp
                 ent["hp"] = new_hp
                 
                 # Send HP update to client
                 send_hp_update(session, session.clientEntID, actual_gain)
-                print(f"[Loot] {char['name']} healed +{actual_gain} HP (Final: {new_hp}/{max_hp if max_hp else '?'}).")
+                print(f"[Loot] {char['name']} healed +{actual_gain} HP (Final: {new_hp}/{max_hp}).")
             else:
                  # Fallback for just updating session text if entity is missing temporarily
                  print(f"[Loot] {char['name']} picked up health globe but entity is missing. HP Sync required.")
@@ -276,6 +280,14 @@ def handle_pickup_lootdrop(session, data):
             print(f"[Loot] {char['name']} picked up Material {mat_id}.")
 
         if save_needed:
+            active_name = char.get("name")
+            if active_name:
+                for c in session.char_list:
+                    if c.get("name") == active_name:
+                        c.update(char)
+                        break
+            # Keep session copy in sync for any downstream logic using current_char_dict.
+            session.current_char_dict = char
             save_characters(session.user_id, session.char_list)
     else:
         # print(f"Unknown loot pick up {loot_id}")
@@ -308,7 +320,13 @@ def handle_talk_to_npc(session, data):
 
     npc = session.entities.get(npc_id)
     if not npc:
-        print(f"[{session.addr}] [PKT0x7A] Unknown NPC ID {npc_id}")
+        # Fallback for client-spawned levels (NewbieRoad, etc.)
+        # where NPCs exist in static data but not in session.entities
+        from globals import get_npc_props
+        npc = get_npc_props(session.current_level, npc_id)
+
+    if not npc:
+        print(f"[{session.addr}] [PKT0x7A] Unknown NPC ID {npc_id}. Available: {list(session.entities.keys())}")
         return
 
     # NPC internal type name:
@@ -1144,16 +1162,121 @@ def handle_grant_reward(session, data):
     elif session.current_level in GS.level_npcs and source_id in GS.level_npcs[session.current_level]:
         source_ent = GS.level_npcs[session.current_level][source_id]
         
+    ent_name = None
     if source_ent:
         ent_name = source_ent.get("name")
-        ent_type_data = get_ent_type(ent_name) if ent_name else {}
-        # Fix: ensure ent_type_data is not None (get_ent_type can return None)
-        if ent_type_data is None:
-            ent_type_data = {}
-            
+        ent_type_data = get_ent_type(ent_name) or {}
         if ent_type_data.get("Flying") == "True":
             is_flying = True
+    else:
+        ent_type_data = {}
 
+    # Track calculated material/gear for drops
+    material_id = 0
+    specific_gear_id = None
+    gear_tier = 0
+
+    # OVERRIDE: If client reports zero gold, calculate proper rewards server-side.
+    # The client often sends real XP but Gold=0 and Item=False for dungeon enemies.
+    if gold == 0:
+        char = session.current_char_dict
+        p_level = char.get("level", 1) if char else 1
+        
+        from game_data import calculate_npc_gold, calculate_npc_exp, calculate_drop_data, get_ent_type
+        from game_data import get_random_material_for_realm, get_gear_id_for_entity
+        import random
+        
+        # Determine dungeon level from LEVEL_CONFIG for gold scaling
+        from level_config import LEVEL_CONFIG
+        dungeon_cfg = LEVEL_CONFIG.get(session.current_level)
+        dungeon_level = dungeon_cfg[1] if dungeon_cfg else p_level  # [1] = map_id = enemy level
+        
+        # Dungeon-to-Realm mapping for material drops when entity name is unknown
+        DUNGEON_REALM_MAP = {
+            "GoblinRiverDungeon": "Goblin", "GoblinRiverDungeonHard": "Goblin",
+            "DreamDragonDungeon": "Ghost", "DreamDragonDungeonHard": "Ghost",
+            "GoblinMineDungeon": "Goblin", "GoblinMineDungeonHard": "Goblin",
+            "SwampCaveDungeon": "Devourer", "SwampCaveDungeonHard": "Devourer",
+            "SpiderNestDungeon": "Spider", "SpiderNestDungeonHard": "Spider",
+            "WyrmCaveDungeon": "Wyrm", "WyrmCaveDungeonHard": "Wyrm",
+            "WolfDenDungeon": "Wolf", "WolfDenDungeonHard": "Wolf",
+            "SkeletonCryptDungeon": "Skeleton", "SkeletonCryptDungeonHard": "Skeleton",
+            "LizardTempleDungeon": "Lizard", "LizardTempleDungeonHard": "Lizard",
+            "MummyTombDungeon": "Mummy", "MummyTombDungeonHard": "Mummy",
+        }
+        
+        # 1. Attempt Precise Calculation using entity data
+        precise_gold = 0
+        precise_xp = 0
+        ent_data_found = False
+        
+        ent_name_lookup = ent_name # from earlier scope
+        if not ent_name_lookup and source_id in session.entities:
+             ent_name_lookup = session.entities[source_id].get("name")
+             
+        if ent_name_lookup:
+             # Use entity's own level from EntType if available, otherwise dungeon level
+             ety = get_ent_type(ent_name_lookup) or {}
+             ent_level = int(ety.get("Level", dungeon_level))
+             
+             precise_gold = calculate_npc_gold(ent_name_lookup, ent_level)
+             precise_xp = calculate_npc_exp(ent_name_lookup, ent_level)
+             if precise_gold > 0 or precise_xp > 0:
+                 ent_data_found = True
+                 if exp <= 1:
+                     exp = precise_xp
+                 gold = precise_gold
+                 
+                 # Recalculate Item Drops based on real data
+                 drop_gear, gear_tier_val = calculate_drop_data(ent_name_lookup, ent_level)
+                 if drop_gear:
+                     drop_gear = True
+                     gear_tier = gear_tier_val
+                     specific_gear_id = get_gear_id_for_entity(ent_name_lookup)
+                 
+                 # Material drop (30% chance, based on entity Realm)
+                 realm = ety.get("Realm")
+                 if realm and realm != "PlayerPet" and random.random() < 0.30:
+                     mat = get_random_material_for_realm(realm)
+                     if mat:
+                         material_id = mat
+        
+        # 2. Fallback if no entity data found (most dungeon kills)
+        if not ent_data_found:
+            # Use dungeon_level for gold table lookup, NOT player level
+            from game_data import MONSTER_GOLD_TABLE
+            idx = max(0, min(dungeon_level, len(MONSTER_GOLD_TABLE) - 1))
+            base_gold = MONSTER_GOLD_TABLE[idx]
+            
+            # Gold: base_gold * 0.4 (minion scalar) * 0.5 + randomization
+            loc10 = 0.4 * base_gold * 0.5
+            calc_gold = int(loc10 + (loc10 * 2 + 1) * random.random())
+            gold = max(1, calc_gold)
+            
+            # XP: keep client XP if it's reasonable, otherwise scale from dungeon level
+            if exp <= 1:
+                calc_xp = 50 + (dungeon_level * 15)
+                exp = int(calc_xp * random.uniform(0.8, 1.2))
+            
+            # 10% chance for gear
+            if random.random() < 0.10:
+                 drop_gear = True
+                 gear_tier = 1
+            
+            # 30% chance for materials based on dungeon realm
+            dungeon_realm = DUNGEON_REALM_MAP.get(session.current_level)
+            if dungeon_realm and random.random() < 0.30:
+                mat = get_random_material_for_realm(dungeon_realm)
+                if mat:
+                    material_id = mat
+        
+        # Logic for HP orb (20% chance)
+        if random.random() < 0.20:
+             hp_gain = int(getattr(session, "authoritative_max_hp", 100) * 0.15)
+             
+        print(f"[Loot Override] {receiver_id} killed {ent_name_lookup or 'Unknown'} (dungeon_lvl={dungeon_level}). Loot: XP={exp}, Gold={gold}, Item={drop_gear}, Material={material_id}")
+        
+    
     if is_flying:
         # Use player's X and Y coordinate (Gravity Fallback)
         player_ent = session.entities.get(session.clientEntID)
@@ -1165,19 +1288,55 @@ def handle_grant_reward(session, data):
                 offset = random.choice([-1, 1]) * random.randint(30, 60)
                 world_x = int(player_ent["pos_x"]) + offset
     else:
-        # Ground Mob: Trust the coordinates reported by client (which likely match the mob's death location)
-        # OR force use of source_ent coordinates if available to be safe
+        # Ground Mob: Trust the coordinates reported by client (matched to mob death)
         if source_ent and "x" in source_ent and "y" in source_ent:
              world_x = int(source_ent.get("pos_x", source_ent["x"]))
              world_y = int(source_ent.get("pos_y", source_ent["y"]))
 
-    # print(f"[DEBUG_LOOT] Mob={source_id} Name={ent_name} Flying={is_flying} FinalX={world_x} FinalY={world_y}")
+    # ---------------------------------------------------------
+    # APPLY XP REWARD (Critical for client-side mobs)
+    # ---------------------------------------------------------
+    if exp > 0:
+        # 1. Send XP Packet to Client
+        from globals import send_xp_reward
+        send_xp_reward(session, exp)
+        
+        # 2. Update Character Data
+        if session.current_char_dict:
+             char = session.current_char_dict
+             current_keys = char.get("xp", 0) + exp
+             char["xp"] = current_keys
+             
+             # Check Level Up
+             from game_data import get_player_level_from_xp
+             old_level = char.get("level", 1)
+             new_level = get_player_level_from_xp(current_keys)
+             if new_level > old_level:
+                 char["level"] = new_level
+                 print(f"[LevelUp] {char.get('name')} {old_level}->{new_level}")
+             
+             save_characters(session.user_id, session.char_list)
 
-    process_drop_reward(session, world_x, world_y, gold, hp_gain, drop_gear, target_id=source_id)
+    # NOTE: Do NOT pass target_id here. handle_grant_reward already added source_id
+    # to processed_reward_sources (line ~1133). If we pass target_id, process_drop_reward
+    # will find the same key in the set and return without spawning any loot.
+    process_drop_reward(session, world_x, world_y, gold, hp_gain, drop_gear, material_id=material_id, gear_tier=gear_tier, specific_gear_id=specific_gear_id)
     
     print(f"Granted Reward Request for {source_id}: XP={exp}, Gold={gold}, Item={drop_gear}")
 
-def process_drop_reward(session, x, y, gold=0, hp_gain=0, drop_gear=False, material_id=0, target_id=0, gear_tier=0, specific_gear_id=None):
+def process_drop_reward(
+    session,
+    x,
+    y,
+    gold=0,
+    hp_gain=0,
+    drop_gear=False,
+    material_id=0,
+    target_id=0,
+    gear_tier=0,
+    specific_gear_id=None,
+    reward_nonce=None,
+):
     # Normalize coordinates to ints for BitBuffer writers
     x = int(round(x))
     y = int(round(y))
@@ -1189,7 +1348,10 @@ def process_drop_reward(session, x, y, gold=0, hp_gain=0, drop_gear=False, mater
 
     # Deduplication check
     if target_id != 0:
-        reward_key = (session.current_level, target_id)
+        if reward_nonce is None:
+            reward_key = (session.current_level, target_id)
+        else:
+            reward_key = (session.current_level, target_id, int(reward_nonce))
         if reward_key in session.processed_reward_sources:
             return
         session.processed_reward_sources.add(reward_key)
@@ -1274,7 +1436,7 @@ def build_lootdrop(
     if gear_id > 0:
         bb.write_method_15(True)
         bb.write_method_6(gear_id, GearType.GEARTYPE_BITSTOSEND)
-        bb.write_method_6(gear_tier, GearType.GEARTYPE_BITSTOSEND)
+        bb.write_method_6(gear_tier, GearType.const_176)
         body = bb.to_bytes()
         return struct.pack(">HH", 0x32, len(body)) + body
     else:

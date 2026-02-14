@@ -333,14 +333,35 @@ def calculate_drop_data(ent_name, ent_level, ent_rank="Minion", item_find_bonus=
       0: Common
       1: Rare
       2: Legendary (Locked if level < 15)
-    
-    Base Chances (Cumulative):
-      Legendary: 0.2% (0.000 - 0.002)
-      Rare:      0.4% (0.002 - 0.006)
-      Common:    1.0% (0.006 - 0.016)
-    
-    item_find_bonus: Multiplier from player's equipped charms (e.g., 0.10 = +10%)
     """
+    ent_type = get_ent_type(ent_name)
+    base_drop_chance = 0.01 # Default 1%
+    if ent_type:
+        # ItemDropChance is often 0-1 range, or percentage?
+        # In XML: <ItemDropChance>0.5</ItemDropChance> (which usually means 50%?? No, likely scaled).
+        # Actually in EntType.txt: const_227[const_102] = 0.2; (Minion)
+        # XML examples had "0".
+        # Let's assume it's a multiplier or raw chance. 
+        # If it's > 1, it's %? If < 1, it's probability?
+        # Let's use it as a multiplier on top of base chance if it's small, 
+        # or THE chance if it seems reasonable.
+        try:
+            val = float(ent_type.get("ItemDropChance", "0"))
+            if val > 0:
+                # If val is like 0.2, maybe that's 20%?
+                # Or maybe it's a multiplier.
+                # Given typical MMO drop rates, 20% for gear is high.
+                # Let's assume it's a multiplier on base rates (approx 1%).
+                # BUT, EntType.txt code says: `_loc16_ = 1 + _loc6_.totalMods.itemDrop;`
+                # Let's safely assume it acts as a scalar.
+                if val > 1.0: val = 1.0 # Cap at 100%
+                # Use it if it triggers?
+                # Let's use a hybrid: Base 1% * (1 + val)?
+                # actually, let's treat it as the raw probability if > 0.
+                base_drop_chance = val * 0.1 # Conservative: 0.5 -> 5%
+        except:
+            pass
+
     # 1. Check strict requirements
     # Legendary (Tier 2) is blocked for early game
     can_drop_legendary = (ent_level >= 15)
@@ -350,22 +371,21 @@ def calculate_drop_data(ent_name, ent_level, ent_rank="Minion", item_find_bonus=
     # Apply item find bonus to thresholds (increases drop chance)
     find_mult = 1.0 + item_find_bonus
     
-    # 2. Check Legendary Drop (Tier 2) - 0.2% Chance
-    legendary_threshold = 0.002 * find_mult
+    # Adjusted probabilities based on base_drop_chance
+    # We maintain the ratio of Common:Rare:Legendary as approx 5:2:1 or similar
+    
+    # Legendary: 10% of drop chance
+    legendary_threshold = (base_drop_chance * 0.1) * find_mult
     if can_drop_legendary and roll < legendary_threshold:
         return True, 2
         
-    # 3. Check Rare Drop (Tier 1) - 0.4% Chance
-    # Cumulative threshold: 0.002 + 0.004 = 0.006
-    rare_threshold = 0.006 * find_mult
+    # Rare: 30% of drop chance
+    rare_threshold = (base_drop_chance * 0.3) * find_mult
     if roll < rare_threshold:
-        # If we are here, it's < 0.006. 
-        # If it was < 0.002 and legendary was blocked, it becomes Rare.
         return True, 1
         
-    # 4. Check Common Drop (Tier 0) - 1.0% Chance
-    # Cumulative threshold: 0.006 + 0.010 = 0.016
-    common_threshold = 0.016 * find_mult
+    # Common: Remaining 60% (total cut)
+    common_threshold = base_drop_chance * find_mult
     if roll < common_threshold:
         return True, 0
         

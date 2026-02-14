@@ -24,7 +24,7 @@ class GlobalState:
         self.next_entity_id = 100000
         self.all_sessions = []
         self.house_visits = {} # token -> owner_char
-        self.dungeon_runs = {}  # level_name -> {"total": N, "killed_ids": set()}
+        self.dungeon_runs = {}  # level_name -> {"total": N, "killed": int}
 
 # a single shared instance:
 GS = GlobalState()
@@ -49,16 +49,22 @@ def get_npc_props(level, entity_id):
     entry = level_map.get(entity_id)
     if entry and isinstance(entry, dict):
         return entry.get("props", entry)
+    level_npcs = GS.level_npcs.get(level, {})
+    if entity_id in level_npcs:
+        ent = level_npcs[entity_id]
+        if isinstance(ent, dict):
+            return ent.get("props", ent)
     return None
 
 def send_quest_progress(session, percent):
-    """Send dungeon quest progress update (0xC8) to client.
+    """Send dungeon quest progress update (0xB7) to client.
     percent: 0-100 integer representing kill progress.
     """
     bb = BitBuffer()
     bb.write_method_4(int(percent))
     payload = bb.to_bytes()
-    pkt = struct.pack(">HH", 0xC8, len(payload)) + payload
+    # 0xB7 matches PKTTYPE_QUEST_PROGRESS_UPDATE in PKTTYPES.py.
+    pkt = struct.pack(">HH", 0xB7, len(payload)) + payload
     session.conn.sendall(pkt)
 
 def record_dungeon_kill(level, entity_id):
@@ -68,10 +74,21 @@ def record_dungeon_kill(level, entity_id):
     run = GS.dungeon_runs.get(level)
     if not run:
         return None
-    killed = run.setdefault("killed_ids", set())
-    killed.add(entity_id)
+    killed_ids = run.setdefault("killed_ids", set())
+    if entity_id not in killed_ids:
+        killed_ids.add(entity_id)
     total = run.get("total", 0)
-    kills = len(killed)
+    if not total:
+        # Recompute total from live entities to avoid stuck 0/partial totals
+        level_map = GS.level_entities.get(level, {})
+        total = sum(
+            1
+            for ent in level_map.values()
+            if ent.get("kind") == "npc" and ent.get("props", {}).get("team") == 2
+        )
+        run["total"] = total
+    kills = len(killed_ids)
+    run["killed"] = kills
     percent = min(100, int((kills * 100) / total)) if total else 0
     return {"percent": percent, "kills": kills, "total": total}
 
@@ -79,9 +96,31 @@ def init_dungeon_run(level_name, total_enemies):
     """Initialize a dungeon run tracker for kill progress."""
     GS.dungeon_runs[level_name] = {
         "total": total_enemies,
+        "killed": 0,
         "killed_ids": set(),
+        "last_reset": time.time(),
     }
     print(f"[Dungeon] Initialized run for {level_name}: {total_enemies} total enemies")
+
+
+def reset_dungeon_run(level_name):
+    """Recompute total enemies for a dungeon and reset kill tracking + rewards."""
+    level_map = GS.level_entities.get(level_name, {})
+    total_enemies = 0
+    for ent in level_map.values():
+        if ent.get("kind") != "npc":
+            continue
+        props = ent.get("props", {})
+        if props.get("team") == 2:
+            total_enemies += 1
+            # Reset per-run flags
+            props["rewards_granted"] = False
+            # Reset HP if max known
+            if "max_hp" in props:
+                props["hp"] = props["max_hp"]
+    if total_enemies <= 0:
+        return
+    init_dungeon_run(level_name, total_enemies)
 
 def send_chat_status(session, text: str):
     """
@@ -617,5 +656,35 @@ def send_admin_chat(msg, targets=None):
         targets = [targets]
 
     # Send to all selected sessions
+    # Send to all selected sessions
     for sess in targets:
             sess.conn.sendall(pkt)
+
+def send_room_boss_info(session, boss_id, boss_name):
+    """
+    Sends Packet 0xAC (PKTTYPE_ROOM_BOSS_INFO) to trigger Boss UI (Health Bar).
+    Structure: [room_id:4][boss1_id:4][boss1_name:str][boss2_id:4][boss2_name:str]
+    """
+    bb = BitBuffer()
+    # Room ID: usually 0 or matched to current room index. 
+    # If unknown, 0 might work for single-room dungeons or current active view.
+    bb.write_method_4(0) 
+    
+    bb.write_method_4(boss_id)
+    bb.write_method_26(boss_name)
+    
+    # Boss 2 (Optional/None)
+    bb.write_method_4(0)
+    bb.write_method_26("")
+    
+    body = bb.to_bytes()
+    pkt = struct.pack(">HH", 0xAC, len(body)) + body
+    
+    # Broadcast to all players in the level
+    level = session.current_level
+    for other in all_sessions:
+        if other.player_spawned and other.current_level == level:
+             other.conn.sendall(pkt)
+    
+    print(f"[BOSS UI] Sent 0xAC for {boss_name} ({boss_id}) in {level}")
+

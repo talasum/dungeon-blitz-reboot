@@ -134,6 +134,69 @@ def handle_public_chat(session, data):
     entity_id = br.read_method_9()
     message   = br.read_method_13()
 
+
+    if message.startswith("/spawn_goblin_dungeon"):
+        from entity import Send_Entity_Data, allocate_entity_id
+        import json
+        import os
+        
+        send_chat_status(session, "Spawning Goblin Dungeon NPCs...")
+        
+        # Load JSON
+        json_path = os.path.join("world_npcs", "GoblinRiverDungeon.json")
+        try:
+            with open(json_path, 'r') as file:
+                npcs = json.load(file)
+                
+            count = 0
+            for npc_template in npcs:
+                # Create a fresh entity ID for this session/level instance
+                npc_id = allocate_entity_id()
+                
+                # Clone data
+                npc = dict(npc_template)
+                npc["id"] = npc_id
+                
+                # ensure position fields are set
+                npc.setdefault("x", npc.get("pos_x", npc.get("x", 0.0)))
+                npc.setdefault("y", npc.get("pos_y", npc.get("y", 0.0)))
+                npc["pos_x"] = npc.get("x", 0.0)
+                npc["pos_y"] = npc.get("y", 0.0)
+                
+                # Register in GS.level_entities so server knows about it (for checks later)
+                level_map = GS.level_entities.setdefault(session.current_level, {})
+                level_map[npc_id] = {
+                    "id": npc_id,
+                    "kind": "npc",
+                    "session": None,
+                    "props": npc,
+                }
+                
+                # Construct packet using helper from entity.py
+                # We need to reshape 'npc' to match what Send_Entity_Data expects if needed,
+                # but 'npc' from JSON usually matches the structure quite well.
+                # However, Send_Entity_Data expects a dict with keys like 'id', 'name', 'x', 'y' etc.
+                # which we have.
+                
+                # Normalize just in case
+                # (Send_Entity_Data uses 'x', 'y', 'v', 'team', etc.)
+                
+                try:
+                    pkt = Send_Entity_Data(npc)
+                    framed = struct.pack(">HH", 0x0F, len(pkt)) + pkt
+                    session.conn.sendall(framed)
+                    count += 1
+                except Exception as ex:
+                    print(f"Error spawning NPC {npc.get('name')}: {ex}")
+            
+            send_chat_status(session, f" spawned {count} NPCs.")
+            
+        except Exception as e:
+            send_chat_status(session, f"Failed to load NPCs: {e}")
+            print(f"Spawn Error: {e}")
+
+        return
+
     print(f"[{get_active_character_name(session)}] Says : \"{message}\"")
 
     # Forward raw unmodified packet to other players in the same level
