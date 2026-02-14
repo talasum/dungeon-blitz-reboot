@@ -87,12 +87,11 @@ class BitBuffer:
             self.debug_log.append(f"method_91={val}, n={n}, bits={bits_to_use}")
 
     def write_method_9(self, val: int):
-        bitlen = val.bit_length()
-        if bitlen % 2:
-            bitlen += 1
-        prefix = (bitlen // 2) - 1
+        bits_needed = val.bit_length() if val > 0 else 1
+        bits_to_use = max(2, (bits_needed + 1) & ~1)
+        prefix = (bits_to_use // 2) - 1
         self.write_method_11(prefix, 4)
-        self.write_method_11(val, bitlen)
+        self.write_method_11(val, bits_to_use)
 
     def write_method_45(self, val: int):
         if val < 0:

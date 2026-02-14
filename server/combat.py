@@ -131,12 +131,16 @@ def apply_and_broadcast_hp_delta(
     pkt = struct.pack(">HH", 0x3A, len(payload)) + payload
 
     for other in all_sessions:
-        if (
-            other is not source_session
-            and other.player_spawned
-            and other.current_level == source_session.current_level
-        ):
-            other.conn.sendall(pkt)
+        if other.player_spawned:
+            # Skip if this is the source session (already handled separately if needed)
+            if source_session and other is source_session:
+                continue
+            
+            # Broadcast to all players in the same level
+            # We use target player's level if source_session is missing
+            target_level = source_session.current_level if source_session else getattr(other, "current_level", None)
+            if other.current_level == target_level:
+                other.conn.sendall(pkt)
 
 
         # game client function handlers
@@ -383,7 +387,7 @@ def handle_power_hit(session, data):
             # Track dungeon kill progress
             progress = None
             if not is_treasure_chest:
-                progress = record_dungeon_kill(level, target_entity_id)
+                progress = record_dungeon_kill(level, target_entity_id, user_id=session.user_id)
             if progress:
                 for s in GS.all_sessions:
                     if s.player_spawned and s.current_level == level:
@@ -842,12 +846,19 @@ def handle_equip_rune(session,  data):
     if len(equipped) > required_slots:
         equipped[:] = equipped[:required_slots]
 
-    # Locate target gear
-    gear = next(
-        (g for g in equipped if g["gearID"] == gear_id and g["tier"] == gear_tier),
-        None
-    )
+    # Locate all instances of the target gear (equipped and inventory)
+    matching_gears = [
+        g for g in equipped if g.get("gearID") == gear_id and g.get("tier") == gear_tier
+    ] + [
+        g for g in inventory if g.get("gearID") == gear_id and g.get("tier") == gear_tier
+    ]
 
+    if not matching_gears:
+        print(f" Warning : Targeted gear {gear_id} (Tier {gear_tier}) not found in equipped or inventory")
+        return
+
+    # Use the first match to determine old rune state
+    gear = matching_gears[0]
     old_rune = gear["runes"][rune_idx]
 
     def add_charm(charm_id, amount=1):
@@ -859,16 +870,25 @@ def handle_equip_rune(session,  data):
 
     def consume_charm(charm_id):
         for c in charms:
-            if c["charmID"] == charm_id:
-                c["count"] -= 1
-                if c["count"] <= 0:
+            # Handle potential malformed entries or merged charms structure
+            if not isinstance(c, dict):
+                continue
+            c_id = c.get("charmID") or c.get("id")
+            if c_id == charm_id:
+                if "count" in c:
+                    c["count"] -= 1
+                    if c["count"] <= 0:
+                        charms.remove(c)
+                else:
+                    # If count is missing, assume 1 and remove
                     charms.remove(c)
                 return True
         return False
 
     # Rune removal (ID 96)
     if rune_id == 96:
-        gear["runes"][rune_idx] = 0
+        for g_item in matching_gears:
+            g_item["runes"][rune_idx] = 0
 
         if old_rune and old_rune != 96:
             add_charm(old_rune)
@@ -883,8 +903,11 @@ def handle_equip_rune(session,  data):
             print(f" Warning : Rune {rune_id} missing from charms")
             return
 
-        # Equip rune (even if same ID)
-        gear["runes"][rune_idx] = rune_id
+        # Equip rune in all matched instances
+        for g_item in matching_gears:
+            g_item["runes"][rune_idx] = rune_id
+            
+        print(f"[DEBUG] Socketed Rune {rune_id} into slot {rune_idx} for all instances of gear {gear_id}. New Runes: {gear['runes']}")
 
     save_characters(session.user_id, session.char_list)
 
@@ -926,10 +949,10 @@ def handle_update_single_gear(session, data):
             "colors": [0, 0],
         })
 
-    # Find gear in inventory
+    # Find gear in inventory OR equipped (to prevent rune wipe if already equipped)
     gear_data = next(
         (g for g in inv if g.get("gearID") == gear_id),
-        None
+        next((g for g in eq if g.get("gearID") == gear_id), None)
     )
 
     if gear_data:
@@ -980,7 +1003,7 @@ def handle_update_equipment(session, data):
 
         item = next(
             (g for g in inventory if g.get("gearID") == gear_id),
-            None
+            next((g for g in equipped if g.get("gearID") == gear_id), None)
         )
 
         equipped[slot] = item.copy() if item else {

@@ -14,8 +14,8 @@ from ai_logic import AI_ENABLED, ensure_ai_loop, run_ai_loop
 from bitreader import BitReader
 from constants import EntType, load_class_template
 from entity import Send_Entity_Data, ensure_level_npcs, normalize_entity_for_send
-from globals import SECRET, _level_add, all_sessions, GS, HOST, PORTS, send_quest_progress, reset_dungeon_run, init_dungeon_run
-from level_config import LEVEL_CONFIG, get_spawn_coordinates
+from globals import SECRET, _level_add, all_sessions, GS, HOST, PORTS, send_quest_progress, reset_dungeon_run, init_dungeon_run, send_npc_dialog
+from level_config import LEVEL_CONFIG, get_spawn_coordinates, send_room_event_start
 from socials import get_group_for_session, online_group_members, update_session_group_cache, build_group_update_packet
 
 # Keep empty in production so dungeon NPCs are server-spawned and obey
@@ -48,9 +48,10 @@ def _spawn_server_level_npcs_for_session(session, force_reload: bool):
     ensure_level_npcs(session.current_level, force_reload=force_reload)
 
     if _is_dungeon_level_for_runtime(session.current_level):
-        reset_dungeon_run(session.current_level)
+        reset_dungeon_run(session.current_level, user_id=session.user_id)
 
-    run = GS.dungeon_runs.get(session.current_level)
+    run_key = (session.current_level, session.user_id) if session.user_id else session.current_level
+    run = GS.dungeon_runs.get(run_key)
     if run:
         kills = len(run.get("killed_ids", []))
         total = run.get("total", 0)
@@ -59,6 +60,7 @@ def _spawn_server_level_npcs_for_session(session, force_reload: bool):
             percent = 0
         session.current_char_dict["questTrackerState"] = percent
         send_quest_progress(session, percent)
+        print(f"[DEBUG] Dungeon Spawn: Level={session.current_level} Kills={kills} Total={total} Percent={percent}%")
 
     level_map = GS.level_entities.get(session.current_level, {})
     npcs = [
@@ -476,3 +478,12 @@ def handle_gameserver_login(session, data):
         _start_client_spawn_fallback(session, force_reload=is_dungeon)
     else:
         _spawn_server_level_npcs_for_session(session, force_reload=is_dungeon)
+
+    # Initial Room Event Start for TutorialDungeon to trigger client-side scripts
+    if session.current_level == "TutorialDungeon":
+        # Try triggering Room 0 and Room 1 to cover bases
+        send_room_event_start(session, 0, True)
+        send_room_event_start(session, 1, True)
+        # Send initial parrot dialogue (Pecky)
+        send_npc_dialog(session, 384606, "Squawk! Goblins! Goblins everywhere! Help Pecky!")
+        print(f"[{session.addr}] Sent Room Event Start and Parrot Chat for TutorialDungeon")

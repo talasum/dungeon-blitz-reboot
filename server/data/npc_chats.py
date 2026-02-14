@@ -15,6 +15,17 @@ NPC_CHATS = {
         "We made it to shore alive, at least."
     ],
 
+    "introparrot": [
+        "Squawk! Goblins! Goblins everywhere! Help Pecky!",
+        "Squawk! Help! Anna is trapped!",
+        "Squawk! Greedy goblins! Greedy goblins!"
+    ],
+    "finkbird": [
+        "Squawk! Goblins! Goblins everywhere! Help Pecky!",
+        "Squawk! Help! Anna is trapped!",
+        "Squawk! Greedy goblins! Greedy goblins!"
+    ],
+
     # Mayor of Wolf's End (NR_Mayor01)
     "nrmayor01": [
         "Thanks to hard fighters like Anna, we've held our own.",

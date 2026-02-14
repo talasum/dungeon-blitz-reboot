@@ -67,11 +67,12 @@ def send_quest_progress(session, percent):
     pkt = struct.pack(">HH", 0xB7, len(payload)) + payload
     session.conn.sendall(pkt)
 
-def record_dungeon_kill(level, entity_id):
+def record_dungeon_kill(level, entity_id, user_id=None):
     """Record an NPC kill in the dungeon run tracker.
     Returns {"percent": int, "kills": int, "total": int} or None if not a tracked dungeon.
     """
-    run = GS.dungeon_runs.get(level)
+    key = (level, user_id) if user_id else level
+    run = GS.dungeon_runs.get(key)
     if not run:
         return None
     killed_ids = run.setdefault("killed_ids", set())
@@ -92,18 +93,19 @@ def record_dungeon_kill(level, entity_id):
     percent = min(100, int((kills * 100) / total)) if total else 0
     return {"percent": percent, "kills": kills, "total": total}
 
-def init_dungeon_run(level_name, total_enemies):
+def init_dungeon_run(level_name, total_enemies, user_id=None):
     """Initialize a dungeon run tracker for kill progress."""
-    GS.dungeon_runs[level_name] = {
+    key = (level_name, user_id) if user_id else level_name
+    GS.dungeon_runs[key] = {
         "total": total_enemies,
         "killed": 0,
         "killed_ids": set(),
         "last_reset": time.time(),
     }
-    print(f"[Dungeon] Initialized run for {level_name}: {total_enemies} total enemies")
+    print(f"[Dungeon] Initialized run for {key}: {total_enemies} total enemies")
 
 
-def reset_dungeon_run(level_name):
+def reset_dungeon_run(level_name, user_id=None):
     """Recompute total enemies for a dungeon and reset kill tracking + rewards."""
     level_map = GS.level_entities.get(level_name, {})
     total_enemies = 0
@@ -118,9 +120,9 @@ def reset_dungeon_run(level_name):
             # Reset HP if max known
             if "max_hp" in props:
                 props["hp"] = props["max_hp"]
-    if total_enemies <= 0:
-        return
-    init_dungeon_run(level_name, total_enemies)
+
+    print(f"[DEBUG] reset_dungeon_run({level_name}, {user_id}): Found {total_enemies} enemies. Resetting kills to 0.")
+    init_dungeon_run(level_name, total_enemies, user_id=user_id)
 
 def send_chat_status(session, text: str):
     """

@@ -435,29 +435,38 @@ def broadcast_npc_attack(
             print(f"[AI Attack] Error sending to {s.addr}: {e}")
             
     # FORCE DAMAGE UPDATE (Server-side authoritative)
-    if damage > 0 and target_id and "session" in target_player:
-        t_session = target_player["session"]
-        # Update HP in entity
-        current_hp = target_player.get("hp", 100)
-        new_hp = max(0, current_hp - damage)
-        target_player["hp"] = new_hp
-        
-        # Also update the session's entity copy if different
-        if t_session and t_session.entities.get(target_id):
-            t_session.entities[target_id]["hp"] = new_hp
+    # FORCE DAMAGE UPDATE (Server-side authoritative)
+    if damage > 0 and target_id:
+        if "session" in target_player:
+            try:
+                t_session = target_player["session"]
+                # Update HP in entity
+                current_hp = target_player.get("hp", 100)
+                new_hp = max(0, current_hp - damage)
+                target_player["hp"] = new_hp
+                
+                # Also update the session's entity copy if different
+                if t_session and t_session.entities.get(target_id):
+                    t_session.entities[target_id]["hp"] = new_hp
 
-        print(f"[AI Attack] Applying {damage} dmg to Player {target_id}. HP: {current_hp} -> {new_hp}")
-        
-        # Send 0x3A Health Update
-        apply_and_broadcast_hp_delta(
-            source_session=target_player["session"],
-            ent_id=target_id,
-            delta=-damage,
-            all_sessions=GS.all_sessions,
-            source_name="NPC_Attack"
-        )
-        # Also notify the target's own client
-        send_hp_update(t_session, target_id, -damage)
+                print(f"[AI Attack] Hit! Applying {damage} dmg to Player {target_id}. HP: {current_hp} -> {new_hp}")
+                
+                # Send 0x3A Health Update
+                apply_and_broadcast_hp_delta(
+                    source_session=target_player["session"],
+                    ent_id=target_id,
+                    delta=-damage,
+                    all_sessions=GS.all_sessions,
+                    source_name="NPC_Attack"
+                )
+                # Also notify the target's own client
+                send_hp_update(t_session, target_id, -damage)
+            except Exception as e:
+                print(f"[AI Attack] Exception during damage apply: {e}")
+        else:
+            print(f"[AI Attack] Warning: target_player {target_id} has no 'session' key. Damage skipped.")
+    else:
+        print(f"[AI Attack] Damage skipped: damage={damage}, target_id={target_id}")
 
 
 # ───────────────── AI loop per level ─────────────────

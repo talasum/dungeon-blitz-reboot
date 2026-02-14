@@ -496,6 +496,16 @@ def handle_request_door_state(session, data):
     send_door_state(session, door_id, door_state, door_target, star_rating)
 
 
+def send_room_event_start(session, room_id, flag):
+    bb = BitBuffer()
+    bb.write_method_4(room_id)
+    bb.write_method_15(flag)
+    
+    payload = bb.to_bytes()
+    pkt = struct.pack(">HH", 0xA5, len(payload)) + payload
+    session.conn.sendall(pkt)
+
+
 def handle_entity_incremental_update(session, data):
     payload = data[4:]
     br = BitReader(payload)
