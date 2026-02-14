@@ -368,6 +368,11 @@ def send_existing_entities_to_joiner(joiner):
     for other in GS.all_sessions:
         if other is joiner:
             continue
+        if (
+            getattr(other, "user_id", None) == getattr(joiner, "user_id", None)
+            and getattr(other, "current_character", None) == getattr(joiner, "current_character", None)
+        ):
+            continue
         if not other.player_spawned or other.current_level != joiner.current_level:
             continue
 
@@ -431,10 +436,11 @@ def handle_entity_full_update(session, data):
     b_dropping = bool(br.read_method_15())
     b_backpedal = bool(br.read_method_15())
 
-    # Track client’s entity ID
-    if is_player and session.clientEntID is None:
-        session.clientEntID = entity_id
-        print(f"[{session.addr}] [PKT08] Learned clientEntID = {entity_id}")
+    # Track client's actual in-world entity ID (not transfer token)
+    if is_player and (ent_name == session.current_character or session.clientEntID is None):
+        if session.clientEntID != entity_id:
+            session.clientEntID = entity_id
+            print(f"[{session.addr}] [PKT08] Learned clientEntID = {entity_id}")
 
     # Build props
     props = {
@@ -465,10 +471,18 @@ def handle_entity_full_update(session, data):
     level = session.current_level
     level_map = GS.level_entities.setdefault(level, {})
 
+    existing_entry = level_map.get(entity_id, {}) if isinstance(level_map.get(entity_id), dict) else {}
+    controlled_player = (
+        is_player
+        or (session.clientEntID is not None and entity_id == session.clientEntID)
+        or (session.current_character and ent_name == session.current_character)
+    )
+    owner_session = session if controlled_player else existing_entry.get("session")
+
     level_map[entity_id] = {
         "id": entity_id,
-        "kind": "player" if is_player else "npc",
-        "session": session if is_player else None,
+        "kind": "player" if controlled_player else "npc",
+        "session": owner_session,
         "props": {
             "id": entity_id,
             "name": ent_name,

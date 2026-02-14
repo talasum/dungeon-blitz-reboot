@@ -742,7 +742,10 @@ def handle_request_visit_player_house(session, data):
         
     # 2. Store target char for the level transfer handler
     # Persistent across connection resets during transfer
-    GS.house_visits[session.clientEntID] = target_char
+    visit_token = getattr(session, "transfer_token", None) or session.clientEntID
+    if visit_token is None:
+        return
+    GS.house_visits[visit_token] = target_char
     
     # 3. Trigger DO_TARGET for CraftTown
     # In level_config.py, door_id 999 is hardcoded to return to CraftTown

@@ -15,6 +15,40 @@ CLASS_BUILD_ORDER = {
     "mage":    [2, 12, 6, 7, 8, 1, 13],
     "rogue":   [2, 12, 9, 10,11, 1, 13],
 }
+
+
+def _normalize_talent_nodes(raw_nodes):
+    normalized = []
+    max_slots = class_118.NUM_TALENT_SLOTS
+
+    for i in range(max_slots):
+        node = raw_nodes[i] if isinstance(raw_nodes, list) and i < len(raw_nodes) else None
+        if not isinstance(node, dict) or not node.get("filled", False):
+            normalized.append({"filled": False, "points": 0, "nodeID": i + 1})
+            continue
+
+        try:
+            node_id = int(node.get("nodeID", i + 1))
+        except Exception:
+            node_id = i + 1
+        if node_id < 1 or node_id > max_slots:
+            node_id = i + 1
+
+        try:
+            points = int(node.get("points", 0))
+        except Exception:
+            points = 0
+        max_points = int(class_118.const_529[i])
+        if points < 1:
+            points = 1
+        if points > max_points:
+            points = max_points
+
+        normalized.append({"filled": True, "points": points, "nodeID": node_id})
+
+    return normalized
+
+
 def Player_Data_Packet(char: dict,
                        event_index: int = 5,
                        transfer_token: int = 0,
@@ -520,9 +554,9 @@ def Player_Data_Packet(char: dict,
     if selected > 0:
         buf.write_method_11(1, 1)
         talent_tree = char.get("TalentTree", {}).get(str(selected), {"nodes": [None] * class_118.NUM_TALENT_SLOTS})
-        nodes = talent_tree.get("nodes", [None] * class_118.NUM_TALENT_SLOTS)
+        nodes = _normalize_talent_nodes(talent_tree.get("nodes", []))
         for i in range(class_118.NUM_TALENT_SLOTS):
-            node = nodes[i] or {"filled": False, "points": 0, "nodeID": i + 1}
+            node = nodes[i]
             if node.get("filled", False):
                 buf.write_method_11(1, 1)
                 node_id = node.get("nodeID", i + 1)

@@ -46,8 +46,15 @@ def write_enttype_gear(bb, gear):
     bb.write_method_6(gear.get("rune2", 0), class_64.const_101)
     bb.write_method_6(gear.get("rune3", 0), class_64.const_101)
 
-    bb.write_method_6(gear.get("color1", 0), class_21.const_50)
-    bb.write_method_6(gear.get("color2", 0), class_21.const_50)
+    colors = gear.get("colors")
+    if isinstance(colors, (list, tuple)) and len(colors) >= 2:
+        color1, color2 = int(colors[0]), int(colors[1])
+    else:
+        color1 = int(gear.get("color1", 0))
+        color2 = int(gear.get("color2", 0))
+
+    bb.write_method_6(color1, class_21.const_50)
+    bb.write_method_6(color2, class_21.const_50)
 
 def build_gear_change_packet(entity_id: int, equipped_gears: list[dict]) -> bytes:
     """
@@ -183,6 +190,9 @@ def handle_respawn_broadcast(session, data):
     heal_amount = br.read_method_24()
     used_potion = br.read_method_15()
     ent = session.entities.get(ent_id)
+
+    if ent is None:
+        return
 
     ent["dead"] = False
     ent["entState"] = 1
@@ -440,11 +450,10 @@ def handle_power_hit(session, data):
                     )
                 print(f"[Combat] Lethal on {ent_name} ({rank}, Realm={realm}). Dropping {gold_amount} Gold, {hp_gain} HP, XP={xp_amount}, Material={material_id}.")
 
-    # If the target is a player, we MUST send an authoritative HP update (0x3A) 
-    # because the client often ignores the HP loss in the 0x0A hit packet for itself.
+    # If the target is a player, send an authoritative HP update (0x3A).
+    # Some client flows ignore HP loss in the raw 0x0A hit packet for self.
     target_player_session = None
-    if target.get("is_player", False):
-        # Find the session for this player entity
+    if target and target.get("is_player", False):
         if target.get("id") == session.clientEntID:
             target_player_session = session
         else:
@@ -452,30 +461,9 @@ def handle_power_hit(session, data):
                 if s.clientEntID == target.get("id"):
                     target_player_session = s
                     break
-    
-    if target_player_session:
-         # Send actual HP loss (negative delta)
-         # Note: damage_value is positive, so we send -damage_value
-         send_hp_update(target_player_session, target.get("id"), -damage_value)
 
-
-    # If the target is a player, we MUST send an authoritative HP update (0x3A) 
-    # because the client often ignores the HP loss in the 0x0A hit packet for itself.
-    target_player_session = None
-    if target.get("is_player", False):
-        # Find the session for this player entity
-        if target.get("id") == session.clientEntID:
-            target_player_session = session
-        else:
-            for s in GS.all_sessions:
-                if s.clientEntID == target.get("id"):
-                    target_player_session = s
-                    break
-    
-    if target_player_session:
-         # Send actual HP loss (negative delta)
-         # Note: damage_value is positive, so we send -damage_value
-         send_hp_update(target_player_session, target.get("id"), -damage_value)
+    if target_player_session and target:
+        send_hp_update(target_player_session, target.get("id"), -damage_value)
 
     # Forward packet unchanged to other clients in same level
     # If using Client-Side AI (player sends hit for enemy), we must echo it back to the player 

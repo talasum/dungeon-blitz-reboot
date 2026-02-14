@@ -17,6 +17,48 @@ from globals import SECRET, _level_add, all_sessions, GS, HOST, PORTS, send_ques
 from level_config import LEVEL_CONFIG, get_spawn_coordinates
 from socials import get_group_for_session, online_group_members, update_session_group_cache, build_group_update_packet
 
+
+def _purge_same_character_ghosts(active_session, user_id, char_name):
+    for level_name, level_map in list(GS.level_entities.items()):
+        if not isinstance(level_map, dict):
+            continue
+        stale_ids = []
+        for eid, ent in level_map.items():
+            if not isinstance(ent, dict):
+                continue
+            props = ent.get("props") if isinstance(ent.get("props"), dict) else {}
+            if ent.get("kind") == "player" and props.get("name") == char_name:
+                stale_ids.append(eid)
+        for eid in stale_ids:
+            level_map.pop(eid, None)
+
+    for other in list(GS.all_sessions):
+        if other is active_session:
+            continue
+        if int(getattr(other, "user_id", -1) or -1) != int(user_id):
+            continue
+        if getattr(other, "current_character", None) != char_name:
+            continue
+
+        if getattr(other, "current_level", None):
+            level_sessions = GS.level_registry.get(other.current_level)
+            if level_sessions and other in level_sessions:
+                level_sessions.discard(other)
+
+        for tk, sess in list(GS.session_by_token.items()):
+            if sess is other:
+                GS.session_by_token.pop(tk, None)
+
+        try:
+            other.conn.close()
+        except Exception:
+            pass
+
+        other.running = False
+        other.authenticated = False
+        if other in GS.all_sessions:
+            GS.all_sessions.remove(other)
+
 def handle_login_version(session, data):
     br = BitReader(data[4:])
     client_version = br.read_method_9()
@@ -124,9 +166,8 @@ def handle_login_character_create(session, data):
     prev_level = new_char["PreviousLevel"]["name"]
 
     tk = session.ensure_token(new_char, target_level=current_level, previous_level=prev_level)
-    session.clientEntID = tk
+    session.transfer_token = tk
     GS.session_by_token[tk] = session
-    _level_add(current_level, session)
 
     level_config = LEVEL_CONFIG.get(current_level, ("LevelsNR.swf/a_Level_NewbieRoad", 1, 1, False))
 
@@ -173,9 +214,8 @@ def handle_character_select(session, data):
         session.current_level = current_level
 
         tk = session.ensure_token(c, target_level=current_level, previous_level=prev_level)
-        session.clientEntID = tk
+        session.transfer_token = tk
         GS.session_by_token[tk] = session
-        _level_add(current_level, session)
 
         level_config = LEVEL_CONFIG.get(
             current_level, ("LevelsNR.swf/a_Level_NewbieRoad", 1, 1, False)
@@ -220,8 +260,33 @@ def handle_gameserver_login(session, data):
 
     entry = GS.pending_world.get(token)
     if entry is None:
-        print(f"[{session.addr}] Invalid token {token}, pending_world size={len(GS.pending_world)}")
-        return
+        key = GS.token_char.get(token)
+        if not key:
+            for k, tk in GS.char_tokens.items():
+                if tk == token:
+                    key = k
+                    GS.token_char[token] = k
+                    break
+        if key:
+            mapped_user_id, mapped_char_name = key
+
+            # Reject token/user mismatches if this session is already authenticated.
+            if session.user_id and int(session.user_id) != int(mapped_user_id):
+                print(f"[{session.addr}] Invalid token {token}: user mismatch ({session.user_id} != {mapped_user_id})")
+                return
+
+            chars = load_characters(mapped_user_id)
+            recovered_char = next((c for c in chars if c.get("name") == mapped_char_name), None)
+            if recovered_char:
+                target_level = recovered_char.get("CurrentLevel", {}).get("name", "CraftTown")
+                previous_level = recovered_char.get("PreviousLevel", {}).get("name", "NewbieRoad")
+                entry = (recovered_char, target_level, previous_level)
+                GS.pending_world[token] = entry
+                print(f"[{session.addr}] Recovered token {token} for {mapped_char_name} (pending_world miss)")
+
+        if entry is None:
+            print(f"[{session.addr}] Invalid token {token}, pending_world size={len(GS.pending_world)}")
+            return
 
     # expect (char, target_level, previous_level)
     char, target_level, previous_level = entry
@@ -238,13 +303,17 @@ def handle_gameserver_login(session, data):
     session.current_char_dict = char
     session.current_level     = target_level
 
+    _purge_same_character_ghosts(session, session.user_id, session.current_character)
+
     # Dungeon entry level
     is_dungeon = LEVEL_CONFIG.get(target_level, (None, None, None, False))[3]
     session.entry_level = previous_level if is_dungeon else None
 
-    session.clientEntID   = token
+    session.transfer_token = token
     session.authenticated = True
     GS.current_characters[session.user_id] = session.current_character
+    GS.session_by_token[token] = session
+    _level_add(target_level, session)
 
     # Load character list from disk and use the fresh data instead of stale in-memory char
     session.char_list = load_characters(session.user_id)
@@ -273,6 +342,8 @@ def handle_gameserver_login(session, data):
     #bonus_levels = level_config[2]
     bonus_levels = 0
 
+    send_extended_block = bool(first_login) or (not getattr(session, "sent_initial_extended_data", False))
+
     welcome = Player_Data_Packet(
         char,
         transfer_token=token,
@@ -282,10 +353,11 @@ def handle_gameserver_login(session, data):
         new_x=int(round(new_x)),
         new_y=int(round(new_y)),
         new_has_coord=new_has_coord,
-        send_extended=first_login,
+        send_extended=send_extended_block,
     )
 
     session.conn.sendall(welcome)
+    session.sent_initial_extended_data = True
 
     gid, group = get_group_for_session(session)
     if gid and group:

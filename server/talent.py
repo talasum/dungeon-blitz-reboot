@@ -8,6 +8,49 @@ from constants import index_to_node_id, class_118, method_277, class_66, Game
 from globals import send_premium_purchase, send_talent_point_research_complete
 from scheduler import scheduler, schedule_Talent_point_research, _on_talent_done_for
 
+
+def _normalize_talent_nodes(raw_nodes):
+    normalized = []
+    max_slots = class_118.NUM_TALENT_SLOTS
+
+    for i in range(max_slots):
+        default = {
+            "nodeID": i + 1,
+            "points": 0,
+            "filled": False,
+        }
+
+        node = raw_nodes[i] if isinstance(raw_nodes, list) and i < len(raw_nodes) else None
+        if not isinstance(node, dict) or not node.get("filled", False):
+            normalized.append(default)
+            continue
+
+        try:
+            node_id = int(node.get("nodeID", i + 1))
+        except Exception:
+            node_id = i + 1
+        if node_id < 1 or node_id > max_slots:
+            node_id = i + 1
+
+        try:
+            points = int(node.get("points", 0))
+        except Exception:
+            points = 0
+
+        max_points = int(class_118.const_529[i])
+        if points < 1:
+            points = 1
+        if points > max_points:
+            points = max_points
+
+        normalized.append({
+            "nodeID": node_id,
+            "points": points,
+            "filled": True,
+        })
+
+    return normalized
+
 def handle_respec_talent_tree(session, data):
     char = next((c for c in session.char_list
                  if c["name"] == session.current_character), None)
@@ -28,10 +71,10 @@ def handle_respec_talent_tree(session, data):
     talent_tree = char.setdefault("TalentTree", {}).setdefault(mc, {})
 
     # reset 27 nodes
-    talent_tree["nodes"] = [
+    talent_tree["nodes"] = _normalize_talent_nodes([
         {"nodeID": index_to_node_id(i), "points": 0, "filled": False}
         for i in range(27)
-    ]
+    ])
 
     save_characters(session.user_id, session.char_list)
 
@@ -90,7 +133,7 @@ def handle_allocate_talent_tree_points(session, data):
                 "nodeIndex": node_index
             })
 
-    talent_tree["nodes"] = slots
+    talent_tree["nodes"] = _normalize_talent_nodes(slots)
 
     save_characters(session.user_id, session.char_list)
 
@@ -281,7 +324,7 @@ def send_active_talent_tree_data(session, entity_id):
         if char.get("name") == session.current_character:
             mc = char.get("MasterClass", 1)
             tree = char.get("TalentTree", {}).get(str(mc), {})
-            nodes = tree.get("nodes", [None] * class_118.NUM_TALENT_SLOTS)
+            nodes = _normalize_talent_nodes(tree.get("nodes", []))
             break
     else:
         return

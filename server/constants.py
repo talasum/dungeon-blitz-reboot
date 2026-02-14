@@ -10,12 +10,11 @@ def index_to_node_id(index: int) -> int:
     Reverse mapping of client method_191:
     Array index (0-26) -> NodeID (1-27)
     """
-    if index < 9:  # indices 0-8 → NodeID 1-9
-        return index + 1
-    elif index < 18:  # indices 9-17 → NodeID 11-19
-        return index + 2
-    else:  # indices 18-26 → NodeID 20-27
-        return index + 3
+    if index < 0:
+        return 1
+    if index > 26:
+        return 27
+    return index + 1
 
 MASTERCLASS_TO_BUILDING = {
     # Rogue

@@ -1,6 +1,7 @@
 import os
 import json
 import struct
+import tempfile
 
 from threading import Lock
 from BitBuffer import BitBuffer
@@ -12,8 +13,42 @@ _lock          = Lock()
 
 def _write_json(path: str, data) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", suffix=".json", dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _load_json_resilient(path: str, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = f.read().lstrip("\ufeff \t\r\n")
+            decoder = json.JSONDecoder()
+            parsed, _ = decoder.raw_decode(raw)
+            backup = f"{path}.corrupt"
+            try:
+                os.replace(path, backup)
+            except OSError:
+                pass
+            _write_json(path, parsed)
+            return parsed
+        except Exception:
+            return default
 
 
 def load_accounts() -> dict[str, int]:
@@ -22,8 +57,8 @@ def load_accounts() -> dict[str, int]:
         with open(_ACCOUNTS_PATH, "w", encoding="utf-8") as f:
             json.dump([], f)
 
-    with open(_ACCOUNTS_PATH, "r", encoding="utf-8") as f:
-        entries = json.load(f)
+    with _lock:
+        entries = _load_json_resilient(_ACCOUNTS_PATH, [])
 
     return {e["email"]: int(e["user_id"]) for e in entries}
 
@@ -84,8 +119,8 @@ def load_characters(user_id: int) -> list[dict]:
     path = os.path.join(CHAR_SAVE_DIR, f"{user_id}.json")
     if not os.path.exists(path):
         return []
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    with _lock:
+        data = _load_json_resilient(path, {"user_id": user_id, "characters": []})
     return data.get("characters", [])
 
 
@@ -98,8 +133,8 @@ def save_characters(user_id: int, char_list: list[dict]):
         "characters": char_list
     }
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    with _lock:
+        _write_json(path, data)
 
 
 def find_user_by_character_name(name: str):

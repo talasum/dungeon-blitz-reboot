@@ -40,12 +40,49 @@ def _level_remove(level, session):
         del level_map[eid]
 
 
+def _purge_session_entities(session):
+    """Best-effort cleanup for ghost entities left by this session across all levels."""
+    player_name = getattr(session, "current_character", None)
+    player_eid = getattr(session, "clientEntID", None)
+
+    for level_name, level_map in list(GS.level_entities.items()):
+        if not isinstance(level_map, dict) or not level_map:
+            continue
+
+        stale_ids = []
+        for eid, ent in list(level_map.items()):
+            if not isinstance(ent, dict):
+                continue
+
+            if ent.get("session") is session:
+                stale_ids.append(eid)
+                continue
+
+            if player_eid is not None and eid == player_eid:
+                stale_ids.append(eid)
+                continue
+
+            props = ent.get("props") if isinstance(ent.get("props"), dict) else {}
+            ent_name = props.get("name")
+            if player_name and ent_name == player_name and ent.get("kind") == "player":
+                stale_ids.append(eid)
+
+        for eid in stale_ids:
+            level_map.pop(eid, None)
+
+    for level_name, sessions in list(GS.level_registry.items()):
+        if session in sessions:
+            sessions.discard(session)
+        if not sessions:
+            GS.level_registry.pop(level_name, None)
+
+
 
 def new_transfer_token():
     """Allocate a persistent 16-bit token not in use."""
     while True:
         t = secrets.randbits(16)
-        if t not in GS.session_by_token:
+        if t not in GS.session_by_token and t not in GS.pending_world and t not in GS.used_tokens and t not in GS.token_char:
            return t
 
 def find_active_session(user_id, char_name):
@@ -78,6 +115,12 @@ class ClientSession:
 
         #  entity tracking
         self.entities = {}  # authoritative movement cache
+        self.transfer_token = None
+
+        # Some clients occasionally send first_login=0 on initial world connect.
+        # Track whether we have already sent the one-time extended player data
+        # for this TCP session so we can force it once safely.
+        self.sent_initial_extended_data = False
 
 
 
@@ -93,16 +136,21 @@ class ClientSession:
     def ensure_token(self, char, target_level=None, previous_level=None):
         key = (self.user_id, char.get("name"))
 
-        # Look up or assign a token
-        if key in GS.char_tokens:
-            tk = GS.char_tokens[key]
-        else:
-            tk = new_transfer_token()
-            GS.char_tokens[key] = tk
-            GS.token_char[tk] = key
+        # Always rotate transfer token for a fresh world/login transition.
+        # Reusing old tokens across reconnects can leak stale pending/session state.
+        old_tk = GS.char_tokens.get(key)
+        if old_tk is not None:
+            GS.session_by_token.pop(old_tk, None)
+            GS.pending_world.pop(old_tk, None)
+            GS.used_tokens.pop(old_tk, None)
+            GS.token_char.pop(old_tk, None)
 
-        # Store session mapping
-        self.clientEntID = tk
+        tk = new_transfer_token()
+        GS.char_tokens[key] = tk
+        GS.token_char[tk] = key
+
+        # Store transfer/session mapping (separate from runtime entity id)
+        self.transfer_token = tk
         GS.session_by_token[tk] = self
 
         return tk
@@ -148,20 +196,32 @@ class ClientSession:
             handle_entity_destroy_server(self, self.clientEntID, all_sessions=GS.all_sessions)
             #print("destroyed entity removal")
 
+        # Always remove this session from level tracking, even if spawn did not complete.
+        # Otherwise stale pre-login sessions can survive reconnects and create ghost state.
+        if self.current_level:
+            _level_remove(self.current_level, self)
+
+        # Safety purge: remove any lingering references owned by this session.
+        _purge_session_entities(self)
+
         try:
             self.conn.close()
         except:
             pass
 
-        s = GS.session_by_token.get(self.clientEntID)
-        if s:
-            s.running = False
-
-        if self.player_spawned and self.current_level:
-            _level_remove(self.current_level, self)
+        # Remove token mappings owned by this session.
+        stale_tokens = [
+            tk for tk, sess in list(GS.session_by_token.items())
+            if sess is self
+        ]
+        for tk in stale_tokens:
+            GS.session_by_token.pop(tk, None)
 
         if self in GS.all_sessions:
             GS.all_sessions.remove(self)
+
+        if self.user_id in GS.current_characters:
+            GS.current_characters.pop(self.user_id, None)
 
 
 def handle_client(session: ClientSession):

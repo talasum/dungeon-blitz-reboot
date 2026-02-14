@@ -398,6 +398,7 @@ PACKET_HANDLERS = {
     0x17:   handle_login_character_create,
     0x16:   handle_character_select,
     0x1f:   handle_gameserver_login, # Welcome / Player_Data (finalize level transfer and spawn NPCs)
+    0xA4:   ignore,
     ############################################
 
     # dev.py
