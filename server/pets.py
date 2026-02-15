@@ -428,7 +428,7 @@ def handle_use_pet_food(session, data):
         print(f"[PET FOOD] ERROR: Invalid consumable ID {consumable_id} or not PetFood type")
         return
     
-    xp_amount = consumable_def.get("Magnitude", 0)
+    xp_amount = int(consumable_def.get("Magnitude", 0) or 0)
     is_rare_pet_food = consumable_def.get("ConsumableName") == "RarePetFood"
     
     # Check if player has this consumable

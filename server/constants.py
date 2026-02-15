@@ -23,8 +23,8 @@ MASTERCLASS_TO_BUILDING = {
     3: 11,  # SoulthiefTower
 
     # Paladin
-    4: 3,   # JusticarTower
-    5: 4,   # SentinelTower
+    4: 4,   # SentinelTower
+    5: 3,   # JusticarTower
     6: 5,   # TemplarTower
 
     # Mage

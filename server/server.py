@@ -260,6 +260,14 @@ def handle_client(session: ClientSession):
                 else:
                     print(f"[{session.addr}] Unhandled packet type: 0x{pkt:02X}, raw payload = {data.hex()}")
 
+    except socket.timeout:
+        print(f"[{addr}] Connection timed out")
+    except OSError as e:
+        if e.errno == 9:
+            print(f"[{addr}] Connection closed")
+        else:
+            print("Session error:", e)
+            traceback.print_exc()
     except Exception as e:
         print("Session error:", e)
         traceback.print_exc()

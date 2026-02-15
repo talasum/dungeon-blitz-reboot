@@ -1314,6 +1314,44 @@ def handle_grant_reward(session, data):
              if new_level > old_level:
                  char["level"] = new_level
                  print(f"[LevelUp] {char.get('name')} {old_level}->{new_level}")
+
+             # 3. Apply same XP to active pet (matches mob XP granted to player)
+             from globals import send_pet_xp_update
+
+             active_pet_info = char.get("activePet") or {}
+             pet_type_id = int(active_pet_info.get("typeID", 0) or 0)
+             pet_special_id = int(active_pet_info.get("special_id", 0) or 0)
+
+             if pet_type_id > 0:
+                 pets_list = char.get("pets", [])
+                 target_pet = next(
+                     (p for p in pets_list
+                      if int(p.get("typeID", 0) or 0) == pet_type_id
+                      and int(p.get("special_id", 0) or 0) == pet_special_id),
+                     None,
+                 )
+                 if target_pet is None and pet_special_id == 0:
+                     target_pet = next(
+                         (p for p in pets_list if int(p.get("typeID", 0) or 0) == pet_type_id),
+                         None,
+                     )
+
+                 if target_pet:
+                     pet_xp_gain = int(exp)
+                     pet_xp_total = int(target_pet.get("xp", 0) or 0) + pet_xp_gain
+                     target_pet["xp"] = pet_xp_total
+                     current_pet_level = int(target_pet.get("level", 1) or 1)
+                     active_pet_info["xp"] = pet_xp_total
+                     active_pet_info["level"] = current_pet_level
+
+                     send_pet_xp_update(
+                         session,
+                         pet_type_id,
+                         pet_special_id,
+                         pet_xp_gain,
+                         current_pet_level,
+                         False,
+                     )
              
              save_characters(session.user_id, session.char_list)
 

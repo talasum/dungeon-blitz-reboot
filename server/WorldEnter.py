@@ -16,6 +16,47 @@ CLASS_BUILD_ORDER = {
     "rogue":   [2, 12, 9, 10,11, 1, 13],
 }
 
+BUILDING_TO_MASTERCLASS = {v: k for k, v in MASTERCLASS_TO_BUILDING.items()}
+CLASS_DEFAULT_MASTERCLASS = {
+    "rogue": 1,
+    "paladin": 4,
+    "mage": 7,
+}
+CLASS_TOWER_BUILDINGS = {
+    "rogue": [9, 10, 11],
+    "paladin": [3, 4, 5],
+    "mage": [6, 7, 8],
+}
+
+
+def _resolve_masterclass_id(char: dict) -> int:
+    class_name = str((char or {}).get("class", "") or "").lower()
+    tower_ids = CLASS_TOWER_BUILDINGS.get(class_name, [])
+
+    raw = int((char or {}).get("MasterClass", 0) or 0)
+    if raw in MASTERCLASS_TO_BUILDING:
+        mapped_tower = MASTERCLASS_TO_BUILDING.get(raw)
+        if not tower_ids or mapped_tower in tower_ids:
+            return raw
+
+    mf_stats = ((char or {}).get("magicForge", {}) or {}).get("stats_by_building", {}) or {}
+
+    def _stat(bid: int) -> int:
+        return int(mf_stats.get(str(bid), mf_stats.get(bid, 0)) or 0)
+
+    best_building_id = 0
+    best_rank = 0
+    for bid in tower_ids:
+        rank = _stat(bid)
+        if rank > best_rank:
+            best_rank = rank
+            best_building_id = bid
+
+    if best_building_id in BUILDING_TO_MASTERCLASS and best_rank > 0:
+        return BUILDING_TO_MASTERCLASS[best_building_id]
+
+    return CLASS_DEFAULT_MASTERCLASS.get(class_name, 0)
+
 
 def _normalize_talent_nodes(raw_nodes):
     normalized = []
@@ -548,7 +589,9 @@ def Player_Data_Packet(char: dict,
         buf.write_method_6(0, 1)
 
     # ──────────────(MasterClass)──────────────
-    selected = int(char.get("MasterClass", 0) or 0)
+    selected = _resolve_masterclass_id(char)
+    if selected and int(char.get("MasterClass", 0) or 0) != selected:
+        char["MasterClass"] = selected
     buf.write_method_6(selected, Game.const_209)
 
     if selected > 0:
@@ -640,28 +683,28 @@ def send_building_update(session, char):
     def _stat(bid):
         return int(mf_stats.get(str(bid), mf_stats.get(bid, 0) or 0))
 
-    master_class_id = int(char.get("MasterClass", 0))
+    master_class_id = _resolve_masterclass_id(char)
     tower_building_id = MASTERCLASS_TO_BUILDING.get(master_class_id, 3)
-
-    # First building: current tower building type & its level
-    first_building_id = tower_building_id
-    first_building_level = _stat(tower_building_id)
-
-    # Second building: maybe same as first but with target upgrade level
-    second_building_id = tower_building_id
-    second_building_level = first_building_level
-
     scaffolding_id = int(char.get("buildingUpgrade", {}).get("buildingID", 0) or 0)
 
-    buf = BitBuffer()
-    buf.write_method_6(first_building_id, class_9.const_129)
-    buf.write_method_6(first_building_level, class_9.const_28)
-    buf.write_method_6(second_building_id, class_9.const_129)
-    buf.write_method_6(second_building_level, class_9.const_28)
-    buf.write_method_6(scaffolding_id, class_9.const_129)
+    def _send_delta(building_id: int, target_rank: int):
+        prev_rank = max(0, target_rank - 1) if target_rank > 0 else 0
 
-    pkt = struct.pack(">HH", 0xDA, len(buf.to_bytes())) + buf.to_bytes()
-    session.conn.sendall(pkt)
+        buf = BitBuffer()
+        buf.write_method_6(building_id, class_9.const_129)
+        buf.write_method_6(prev_rank, class_9.const_28)
+        buf.write_method_6(building_id, class_9.const_129)
+        buf.write_method_6(target_rank, class_9.const_28)
+        buf.write_method_6(scaffolding_id, class_9.const_129)
+
+        payload = buf.to_bytes()
+        pkt = struct.pack(">HH", 0xDA, len(payload)) + payload
+        session.conn.sendall(pkt)
+
+    # CraftTown visuals can desync if 0x21 arrives before full UI/assets.
+    # Re-assert every core building via 0xDA updates.
+    for bid in (2, 12, tower_building_id, 1, 13):
+        _send_delta(bid, _stat(bid))
 
 def build_enter_world_packet(
     transfer_token: int,
@@ -746,11 +789,13 @@ def build_enter_world_packet(
         buf.write_method_4(new_level_id)
 
         # --- WRITE master class id so the client parses the following fields correctly ---
-        master_class_id = int(char.get("MasterClass", 0) if char else 0)
+        master_class_id = _resolve_masterclass_id(char or {})
+        if char and int(char.get("MasterClass", 0) or 0) != master_class_id and master_class_id:
+            char["MasterClass"] = master_class_id
         buf.write_method_6(master_class_id, Game.const_209)
 
         # Map MasterClass -> building id for tower lookup (ensure MASTERCLASS_TO_BUILDING exists)
-        tower_building_id = MASTERCLASS_TO_BUILDING.get(master_class_id, 0)
+        tower_building_id = MASTERCLASS_TO_BUILDING.get(master_class_id, 3)
 
         # Get building stats from the new save structure
         stats_by_building = {}

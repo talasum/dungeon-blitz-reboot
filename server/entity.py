@@ -1,6 +1,7 @@
 import json
 import os
 import struct
+import threading
 import time
 
 from typing import Dict, Any
@@ -8,6 +9,27 @@ from BitBuffer import BitBuffer
 from bitreader import BitReader
 from constants import Entity, class_7, class_20, class_3, Game, LinkUpdater, EntType, GearType, class_64, class_21, class_118, method_277
 from globals import GS, init_dungeon_run
+
+
+def _refresh_crafttown_buildings_on_spawn(session):
+    from WorldEnter import send_building_update
+
+    def _send_once(delay_sec: float):
+        def _worker():
+            if delay_sec > 0:
+                time.sleep(delay_sec)
+            if not getattr(session, "running", False):
+                return
+            if getattr(session, "current_level", None) != "CraftTown":
+                return
+            latest_char = getattr(session, "current_char_dict", None) or {}
+            send_building_update(session, latest_char)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # Keep a short retry window to cover delayed UI/asset readiness.
+    for delay in (0.0, 1.2, 2.8):
+        _send_once(delay)
 
 """
 Hints NPCs data 
@@ -448,6 +470,9 @@ def handle_entity_full_update(session, data):
         if session.clientEntID != entity_id:
             session.clientEntID = entity_id
             print(f"[{session.addr}] [PKT08] Learned clientEntID = {entity_id}")
+            if session.current_level == "CraftTown" and getattr(session, "crafttown_building_refresh_pending", False):
+                _refresh_crafttown_buildings_on_spawn(session)
+                session.crafttown_building_refresh_pending = False
 
     # Build props
     props = {

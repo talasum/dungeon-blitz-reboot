@@ -420,71 +420,49 @@ def handle_power_hit(session, data):
             # Add XP to character and check for level up
             char = session.current_char_dict
             if char and xp_amount > 0:
-                current_xp = char.get("xp", 0) + xp_amount
+                xp_gain = int(xp_amount)
+                current_xp = int(char.get("xp", 0) or 0) + xp_gain
                 char["xp"] = current_xp
-                
-                # Add XP to character and check for level up
-                # Add XP to character and check for level up
-                char = session.current_char_dict
-                if char:
-                    current_xp = char.get("xp", 0) + xp_amount
-                    char["xp"] = current_xp
-                    
-                    # Auto level-up: calculate level from XP
-                    from game_data import get_player_level_from_xp
-                    old_level = char.get("level", 1)
-                    new_level = get_player_level_from_xp(current_xp)
-                    if new_level > old_level:
-                        char["level"] = new_level
-                        print(f"[Combat] {char.get('name', 'Player')} LEVELED UP! {old_level} -> {new_level}")
-                    
-                    # LOG only
-                    print(f"[Combat] {char.get('name', 'Player')} gained {xp_amount} XP (Total: {current_xp})")
 
-                    # SAVE PROGRESS (Fixes reset bug)
-                    save_characters(session.user_id, session.char_list)
+                # Auto level-up: calculate level from XP
+                from game_data import get_player_level_from_xp
+                old_level = int(char.get("level", 1) or 1)
+                new_level = get_player_level_from_xp(current_xp)
+                if new_level > old_level:
+                    char["level"] = new_level
+                    print(f"[Combat] {char.get('name', 'Player')} LEVELED UP! {old_level} -> {new_level}")
 
                 # --- Pet XP from combat kill ---
-                if char:
-                    from pets import get_level_for_xp as get_pet_level_for_xp
-                    active_pet_info = char.get("activePet") or {}
-                    pet_type_id = active_pet_info.get("typeID", 0)
-                    pet_special_id = active_pet_info.get("special_id", 0)
+                active_pet_info = char.get("activePet") or {}
+                pet_type_id = int(active_pet_info.get("typeID", 0) or 0)
+                pet_special_id = int(active_pet_info.get("special_id", 0) or 0)
 
-                    if pet_type_id and pet_special_id:
-                        pets_list = char.get("pets", [])
+                if pet_type_id > 0:
+                    pets_list = char.get("pets", [])
+                    target_pet = next(
+                        (p for p in pets_list
+                         if int(p.get("typeID", 0) or 0) == pet_type_id
+                         and int(p.get("special_id", 0) or 0) == pet_special_id),
+                        None,
+                    )
+                    if target_pet is None and pet_special_id == 0:
                         target_pet = next(
-                            (p for p in pets_list
-                             if p.get("typeID") == pet_type_id
-                             and p.get("special_id") == pet_special_id),
+                            (p for p in pets_list if int(p.get("typeID", 0) or 0) == pet_type_id),
                             None,
                         )
-                        if target_pet:
-                            pet_xp = target_pet.get("xp", 0) + xp_amount
-                            target_pet["xp"] = pet_xp
-                            new_pet_level = get_pet_level_for_xp(pet_xp)
-                            target_pet["level"] = new_pet_level
-                            active_pet_info["xp"] = pet_xp
-                            active_pet_info["level"] = new_pet_level
-                            send_pet_xp_update(
-                                session, pet_type_id, pet_special_id,
-                                xp_amount, new_pet_level, False
-                            )
-                            save_characters(session.user_id, session.char_list)
-                
-                # Calculate HP gain for globe
-                # Small mobs (Minion) = 15% heal, Big mobs (Lieutenant/Boss) = 40% heal
-                # This scaling triggers the "Big Globe" visual in the client
-                player_max_hp = getattr(session, "authoritative_max_hp", 100)
-                ent_type_for_rank = get_ent_type(ent_name)
-                # Fix: Handle client-spawned entities not in EntTypes.json
-                rank = ent_type_for_rank.get("EntRank", "Minion") if ent_type_for_rank else "Minion"
-                
-                hp_percent = 0.4 if rank in ["Lieutenant", "Boss", "MiniBoss"] else 0.15
-                hp_gain = int(player_max_hp * hp_percent)
-                
-                print(f"[Combat] {char.get('name', 'Player')} gained {xp_amount} XP (Total: {current_xp})")
 
+                    if target_pet:
+                        pet_xp = int(target_pet.get("xp", 0) or 0) + xp_gain
+                        target_pet["xp"] = pet_xp
+                        current_pet_level = int(target_pet.get("level", 1) or 1)
+                        active_pet_info["xp"] = pet_xp
+                        active_pet_info["level"] = current_pet_level
+                        send_pet_xp_update(
+                            session, pet_type_id, pet_special_id,
+                            xp_gain, current_pet_level, False
+                        )
+
+                print(f"[Combat] {char.get('name', 'Player')} gained {xp_gain} XP (Total: {current_xp})")
                 save_characters(session.user_id, session.char_list)
             
             # Calculate HP gain for globe

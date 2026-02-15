@@ -361,6 +361,7 @@ def handle_level_transfer_request(session, data):
     # Create a fresh transfer token for the new world
     new_token = session.ensure_token(char, target_level=target_level, previous_level=old_level)
     GS.pending_world[new_token] = (char, target_level, old_level)
+    GS.pending_extended[new_token] = False
 
     # Build and send ENTER_WORLD packet
     if target_level not in LEVEL_CONFIG:

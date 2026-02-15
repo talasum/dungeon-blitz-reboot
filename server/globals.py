@@ -25,6 +25,7 @@ class GlobalState:
         self.all_sessions = []
         self.house_visits = {} # token -> owner_char
         self.dungeon_runs = {}  # level_name -> {"total": N, "killed": int}
+        self.pending_extended = {}  # transfer_token -> should_send_extended_player_data
 
 # a single shared instance:
 GS = GlobalState()
@@ -613,12 +614,10 @@ def send_pet_xp_update(session, pet_type_id, pet_special_id, xp_amount, new_leve
         new_level: The pet's new level after XP gain
         is_rare_pet_food: Whether rare pet food was used (grants +1 level)
     """
+    # Client parser (LinkUpdater.method_1816) reads ONLY one method_4() value
+    # and treats it as XP delta for the currently active pet.
     bb = BitBuffer()
-    bb.write_method_6(pet_type_id, class_7.const_19)   # pet type ID
-    bb.write_method_4(pet_special_id)                   # pet special/instance ID
-    bb.write_method_4(xp_amount)                        # XP gain amount
-    bb.write_method_6(new_level, class_7.const_75)      # new level
-    bb.write_method_15(is_rare_pet_food)                # rare pet food flag
+    bb.write_method_4(int(xp_amount))
 
     body = bb.to_bytes()
     pkt = struct.pack(">HH", 0xf2, len(body)) + body

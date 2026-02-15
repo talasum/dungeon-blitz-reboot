@@ -95,6 +95,7 @@ def _start_client_spawn_fallback(session, force_reload: bool):
 
     threading.Thread(target=_worker, daemon=True).start()
 
+
 def _purge_same_character_ghosts(active_session, user_id, char_name):
     for level_name, level_map in list(GS.level_entities.items()):
         if not isinstance(level_map, dict):
@@ -272,6 +273,7 @@ def handle_login_character_create(session, data):
 
     session.conn.sendall(pkt)
     GS.pending_world[tk] = (new_char, current_level, prev_level)
+    GS.pending_extended[tk] = True
 
     print(f"[{session.addr}] [0x17] Character '{name}' created → entering {current_level} (tk={tk})")
 
@@ -326,6 +328,7 @@ def handle_character_select(session, data):
 
         session.conn.sendall(pkt)
         GS.pending_world[tk] = (c, current_level, prev_level)
+        GS.pending_extended[tk] = True
         print(f"[{session.addr}] [0x16] Transfer begin: {name}, tk={tk}, level={current_level}")
 
 def handle_gameserver_login(session, data):
@@ -419,7 +422,8 @@ def handle_gameserver_login(session, data):
     #bonus_levels = level_config[2]
     bonus_levels = 0
 
-    send_extended_block = bool(first_login) or (not getattr(session, "sent_initial_extended_data", False))
+    token_requests_extended = bool(GS.pending_extended.pop(token, False))
+    send_extended_block = bool(first_login) or token_requests_extended
 
     welcome = Player_Data_Packet(
         char,
@@ -435,6 +439,8 @@ def handle_gameserver_login(session, data):
 
     session.conn.sendall(welcome)
     session.sent_initial_extended_data = True
+
+    session.crafttown_building_refresh_pending = (target_level == "CraftTown")
 
     gid, group = get_group_for_session(session)
     if gid and group:
@@ -473,9 +479,9 @@ def handle_gameserver_login(session, data):
             init_dungeon_run(session.current_level, 0)
             session.current_char_dict["questTrackerState"] = 0
             send_quest_progress(session, 0)
-        # Some clients may not emit NPC 0x08 spawns for this map in non-dev mode.
-        # Fallback keeps the dungeon playable instead of leaving it empty.
-        _start_client_spawn_fallback(session, force_reload=is_dungeon)
+            # Some clients may not emit NPC 0x08 spawns for dungeon maps in non-dev mode.
+            # Fallback keeps the dungeon playable instead of leaving it empty.
+            _start_client_spawn_fallback(session, force_reload=is_dungeon)
     else:
         _spawn_server_level_npcs_for_session(session, force_reload=is_dungeon)
 
