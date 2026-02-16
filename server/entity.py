@@ -31,6 +31,20 @@ def _refresh_crafttown_buildings_on_spawn(session):
     for delay in (0.0, 1.2, 2.8):
         _send_once(delay)
 
+
+def _request_client_combat_stats_sync(session):
+    if not session or not getattr(session, "conn", None):
+        return
+    bb = BitBuffer()
+    bb.write_method_6(0, Game.const_794)
+    bb.write_method_4(0)
+    payload = bb.to_bytes()
+    packet = struct.pack(">HH", 0xFB, len(payload)) + payload
+    try:
+        session.conn.sendall(packet)
+    except OSError:
+        return
+
 """
 Hints NPCs data 
 [
@@ -469,7 +483,24 @@ def handle_entity_full_update(session, data):
     if is_player and (ent_name == session.current_character or session.clientEntID is None):
         if session.clientEntID != entity_id:
             session.clientEntID = entity_id
+
+            level = int((session.current_char_dict or {}).get("level", 1) or 1)
+            level = max(1, min(level, len(Entity.PLAYER_HITPOINTS) - 1))
+            fallback_max_hp = int(Entity.PLAYER_HITPOINTS[level])
+
+            current_max_hp = int(getattr(session, "authoritative_max_hp", 0) or 0)
+            if current_max_hp <= 0 or current_max_hp <= 100:
+                session.authoritative_max_hp = fallback_max_hp
+                current_max_hp = fallback_max_hp
+
+            current_hp = getattr(session, "authoritative_current_hp", None)
+            if current_hp is None:
+                session.authoritative_current_hp = current_max_hp
+            else:
+                session.authoritative_current_hp = min(max(0, int(current_hp)), current_max_hp)
+
             print(f"[{session.addr}] [PKT08] Learned clientEntID = {entity_id}")
+            _request_client_combat_stats_sync(session)
             if session.current_level == "CraftTown" and getattr(session, "crafttown_building_refresh_pending", False):
                 _refresh_crafttown_buildings_on_spawn(session)
                 session.crafttown_building_refresh_pending = False
@@ -518,6 +549,13 @@ def handle_entity_full_update(session, data):
                 send_room_boss_info(session, entity_id, ent_name)
 
     session.entities[entity_id] = props
+
+    if entity_id == session.clientEntID:
+        max_hp = int(getattr(session, "authoritative_max_hp", 0) or 0)
+        if max_hp > 0:
+            props["max_hp"] = max_hp
+            props["hp"] = int(getattr(session, "authoritative_current_hp", max_hp) or max_hp)
+
     level = session.current_level
     level_map = GS.level_entities.setdefault(level, {})
 

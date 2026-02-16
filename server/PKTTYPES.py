@@ -8,7 +8,7 @@ from entity import handle_entity_full_update
 from globals import Client_Crash_Reports
 
 from Commands import handle_badge_request, handle_linkupdater, handle_talk_to_npc, handle_lockbox_reward, \
-    handle_queue_potion, handle_hp_increase_notice, handle_grant_reward, handle_power_use, handle_pickup_lootdrop, \
+    handle_queue_potion, handle_hp_increase_notice, handle_client_hp_report, handle_grant_reward, handle_power_use, handle_pickup_lootdrop, \
     handle_set_level_complete, handle_send_combat_stats, handle_dungeon_run_report, handle_buy_treasure_trove, \
     handle_buy_lockbox_keys
 from Forge import handle_start_forge, handle_forge_speed_up_packet, handle_collect_forge_charm, handle_cancel_forge, handle_use_forge_xp_consumable, handle_allocate_magic_forge_artisan_skill_points, handle_magic_forge_reroll
@@ -552,6 +552,7 @@ PACKET_HANDLERS = {
     0x107:  handle_lockbox_reward,
     0x10E:  handle_queue_potion,
     0xBB:   handle_hp_increase_notice,
+    0xF6:   handle_client_hp_report,
     0x2A:   handle_grant_reward,
     0xCB:   handle_power_use,
     0x38:   handle_pickup_lootdrop,

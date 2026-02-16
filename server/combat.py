@@ -227,6 +227,8 @@ def handle_respawn_broadcast(session, data):
         max_hp = heal_amount
 
     ent["hp"] = min(heal_amount, max_hp)
+    if ent_id == session.clientEntID:
+        session.authoritative_current_hp = int(ent["hp"])
 
     bb = BitBuffer()
     bb.write_method_4(ent_id)
@@ -544,6 +546,18 @@ def handle_power_hit(session, data):
                     break
     
     if target_player_session:
+         new_hp_int = max(0, int(new_hp))
+         max_hp_for_target = getattr(target_player_session, "authoritative_max_hp", None)
+         if max_hp_for_target is not None:
+             new_hp_int = min(new_hp_int, int(max_hp_for_target))
+         target_player_session.authoritative_current_hp = new_hp_int
+
+         target_ent = target_player_session.entities.get(target.get("id")) if target else None
+         if target_ent is not None:
+             target_ent["hp"] = new_hp_int
+             if target.get("max_hp") is not None:
+                 target_ent["max_hp"] = target.get("max_hp")
+
          # Send actual HP loss (negative delta)
          # Note: damage_value is positive, so we send -damage_value
          send_hp_update(target_player_session, target.get("id"), -damage_value)

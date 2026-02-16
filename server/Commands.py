@@ -3,7 +3,7 @@ import random
 import time
 
 from bitreader import BitReader
-from constants import GearType, class_3, PowerType, Game, class_119, PET_TYPES, get_egg_id
+from constants import GearType, class_3, PowerType, Game, class_119, PET_TYPES, get_egg_id, Entity
 from BitBuffer import BitBuffer
 from globals import build_start_skit_packet
 from missions import get_mission_extra
@@ -164,6 +164,8 @@ def handle_send_combat_stats(session, data):
     # Sync with player entity
     ent = session.entities.get(session.clientEntID)
     session.authoritative_max_hp = max_hp # Store on session for persistence across level loads
+
+    print(f"[HP Sync] Stats from client: melee={melee_damage}, magic={magic_damage}, max_hp={max_hp}, rev={stat_rev}")
     
     if ent:
         prev_max_hp = ent.get("max_hp", 0)
@@ -176,6 +178,14 @@ def handle_send_combat_stats(session, data):
         else:
             # Ensure current HP doesn't exceed new max
             ent["hp"] = min(ent["hp"], max_hp)
+
+        session.authoritative_current_hp = int(ent.get("hp", max_hp))
+    else:
+        prev_hp = getattr(session, "authoritative_current_hp", None)
+        if prev_hp is None:
+            session.authoritative_current_hp = max_hp
+        else:
+            session.authoritative_current_hp = min(max(0, int(prev_hp)), max_hp)
 
 
 #TODO...
@@ -202,40 +212,64 @@ def handle_pickup_lootdrop(session, data):
             print(f"[Loot] {char['name']} picked up {amount} Gold. Total now {char['gold']}.")
 
         if "health" in loot:
-            hp_gain = loot["health"]
+            hp_gain = int(loot["health"])
             # Update entity HP
             ent = session.entities.get(session.clientEntID)
             
             # Determine max HP: prefer session-based authoritative, fallback to entity data or 100
             max_hp = getattr(session, "authoritative_max_hp", None)
+            if max_hp is None and ent:
+                max_hp = ent.get("max_hp", None)
+            max_hp = int(max_hp) if max_hp is not None else 100
+            if max_hp <= 0:
+                max_hp = 100
+
+            current_hp = getattr(session, "authoritative_current_hp", None)
+            if current_hp is None:
+                if ent and "hp" in ent:
+                    current_hp = int(ent.get("hp", max_hp))
+                else:
+                    current_hp = max_hp
+            current_hp = min(max(0, int(current_hp)), max_hp)
+            session.authoritative_current_hp = current_hp
             
             if ent:
-                current_hp = ent.get("hp", 100)
-                
-                # If authoritative_max_hp not yet synced, use entity's stored max_hp
-                if max_hp is None:
-                    max_hp = ent.get("max_hp", 100)
-                    print(f"[Loot] {char['name']} picked up health globe (using entity max_hp={max_hp}).")
-                
                 ent["max_hp"] = max_hp  # Keep entity in sync
+                ent["hp"] = current_hp
                 
-                # Check if already at max HP
-                if current_hp >= max_hp:
-                    print(f"[Loot] {char['name']} picked up health globe but HP is full (HP: {current_hp}/{max_hp}).")
-                    return # Don't consume or heal if full
+            # Check if already at max HP
+            actual_gain = 0
+            if current_hp >= max_hp:
+                print(f"[Loot] {char['name']} picked up health globe but HP is full (HP: {current_hp}/{max_hp}).")
 
+                # Client-side levels can drift by a few HP (client receives local damage first).
+                # Queue a short-lived delayed heal and request fresh HP report (0xF9 -> client sends 0xF6).
+                session.pending_orb_heal = {
+                    "amount": hp_gain,
+                    "expires_at": time.time() + 1.5,
+                }
+
+                bb_hp_req = BitBuffer()
+                bb_hp_req.write_method_6(0, Game.const_390)
+                hp_req_payload = bb_hp_req.to_bytes()
+                hp_req_packet = struct.pack(">HH", 0xF9, len(hp_req_payload)) + hp_req_payload
+                session.conn.sendall(hp_req_packet)
+            else:
                 # Always clamp to max HP
                 new_hp = min(max_hp, current_hp + hp_gain)
                 actual_gain = new_hp - current_hp
-                ent["hp"] = new_hp
-                
-                # Send HP update to client
-                send_hp_update(session, session.clientEntID, actual_gain)
+                session.authoritative_current_hp = new_hp
+                if ent:
+                    ent["hp"] = new_hp
+
+                # Send HP update to client only for real gain
+                if actual_gain > 0:
+                    send_hp_update(session, session.clientEntID, actual_gain)
                 print(f"[Loot] {char['name']} healed +{actual_gain} HP (Final: {new_hp}/{max_hp}).")
-            else:
-                 # Fallback for just updating session text if entity is missing temporarily
-                 print(f"[Loot] {char['name']} picked up health globe but entity is missing. HP Sync required.")
-            print(f"[Loot] {char['name']} picked up health globe (+{hp_gain} HP).")
+            print(
+                f"[Loot] {char['name']} picked up health globe "
+                f"(orb={hp_gain}, applied={actual_gain}, hp={session.authoritative_current_hp}/{max_hp})."
+            )
              
         if "gear" in loot:
             gear_id = loot["gear"]
@@ -418,10 +452,11 @@ def handle_talk_to_npc(session, data):
 
 
 def handle_lockbox_reward(session, data):
-    _=data[4:]
+    _ = data[4:]
     CAT_BITS = 3
     ID_BITS = 6
     PACK_ID = 1
+    TROVE_LOCKBOX_ID = 1
     
     # All legendary dyes (rarity "L") from Game.swz.txt - using DyeName format (CamelCase)
     # Client looks up dyes by DyeName, not DisplayName
@@ -505,6 +540,35 @@ def handle_lockbox_reward(session, data):
     char = session.current_char_dict
     if not char:
         return
+
+    # Consume one treasure trove + one key on server side.
+    # Client updates these locally too, but we must persist to disk to prevent reset on relog.
+    lockboxes = char.setdefault("lockboxes", [])
+    trove_entry = None
+    for box in lockboxes:
+        if int(box.get("lockboxID", 0)) == TROVE_LOCKBOX_ID:
+            trove_entry = box
+            break
+
+    current_trove_count = int(trove_entry.get("count", 0)) if trove_entry else 0
+    if current_trove_count <= 0:
+        print(f"[Lockbox] {char.get('name', 'Unknown')} has no treasure troves to open")
+        return
+
+    current_keys = int(char.get("DragonKeys", 0))
+    if current_keys <= 0:
+        print(f"[Lockbox] {char.get('name', 'Unknown')} has no Dragon Keys to open a trove")
+        return
+
+    trove_entry["count"] = current_trove_count - 1
+    if trove_entry["count"] <= 0:
+        lockboxes.remove(trove_entry)
+
+    char["DragonKeys"] = current_keys - 1
+    print(
+        f"[Lockbox] Consumed 1 trove + 1 key for {char.get('name', 'Unknown')} "
+        f"(troves: {current_trove_count - 1}, keys: {char['DragonKeys']})"
+    )
     
     player_class = char.get("class", "").lower()
     
@@ -659,7 +723,7 @@ def handle_lockbox_reward(session, data):
     print(f"Lockbox reward: idx={idx}, name={name}, type={reward_type}")
 
     
-    save_needed = False
+    save_needed = True
     
     
     # ALWAYS grant Royal Sigils when opening a lockbox (50-150 sigils)
@@ -1027,7 +1091,70 @@ def handle_buy_lockbox_keys(session, data):
 
 
 def handle_hp_increase_notice(session, data):
-       pass
+    br = BitReader(data[4:])
+    max_hp_delta = int(br.read_method_24())
+
+    level = int((session.current_char_dict or {}).get("level", 1) or 1)
+    level = max(1, min(level, len(Entity.PLAYER_HITPOINTS) - 1))
+    fallback_max = int(Entity.PLAYER_HITPOINTS[level])
+
+    current_max = int(getattr(session, "authoritative_max_hp", fallback_max) or fallback_max)
+    new_max = max(1, current_max + max_hp_delta)
+    session.authoritative_max_hp = new_max
+
+    ent = session.entities.get(session.clientEntID) if session.clientEntID is not None else None
+    if ent is not None:
+        ent["max_hp"] = new_max
+        ent_current = int(ent.get("hp", new_max) or new_max)
+        ent["hp"] = min(max(0, ent_current), new_max)
+
+    current_hp = int(getattr(session, "authoritative_current_hp", new_max) or new_max)
+    session.authoritative_current_hp = min(max(0, current_hp), new_max)
+
+
+def handle_client_hp_report(session, data):
+    br = BitReader(data[4:])
+    client_curr_hp = int(br.read_method_24())
+
+    # Client also sends a small reason/source field + a bool flag; consume to keep parser aligned.
+    _ = br.read_method_20(Game.const_390)
+    _ = br.read_method_15()
+
+    level = int((session.current_char_dict or {}).get("level", 1) or 1)
+    level = max(1, min(level, len(Entity.PLAYER_HITPOINTS) - 1))
+    fallback_max = int(Entity.PLAYER_HITPOINTS[level])
+    max_hp = int(getattr(session, "authoritative_max_hp", fallback_max) or fallback_max)
+    if max_hp <= 0:
+        max_hp = fallback_max
+        session.authoritative_max_hp = max_hp
+
+    synced_hp = min(max(0, client_curr_hp), max_hp)
+    session.authoritative_current_hp = synced_hp
+    session.last_client_hp_report_ts = time.time()
+
+    ent = session.entities.get(session.clientEntID) if session.clientEntID is not None else None
+    if ent is not None:
+        ent["max_hp"] = max_hp
+        ent["hp"] = synced_hp
+
+    pending_orb_heal = getattr(session, "pending_orb_heal", None)
+    if pending_orb_heal:
+        expires_at = float(pending_orb_heal.get("expires_at", 0.0) or 0.0)
+        amount = int(pending_orb_heal.get("amount", 0) or 0)
+        session.pending_orb_heal = None
+
+        if amount > 0 and time.time() <= expires_at and synced_hp < max_hp:
+            apply_gain = min(max_hp - synced_hp, amount)
+            if apply_gain > 0:
+                new_hp = synced_hp + apply_gain
+                session.authoritative_current_hp = new_hp
+                if ent is not None:
+                    ent["hp"] = new_hp
+                send_hp_update(session, session.clientEntID, apply_gain)
+                print(
+                    f"[HP DriftFix] Applied delayed orb heal +{apply_gain} "
+                    f"after client HP report ({new_hp}/{max_hp})."
+                )
 
 
 #TODO...

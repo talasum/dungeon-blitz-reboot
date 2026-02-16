@@ -449,6 +449,15 @@ def broadcast_npc_attack(
                 if t_session and t_session.entities.get(target_id):
                     t_session.entities[target_id]["hp"] = new_hp
 
+                if t_session:
+                    max_hp = getattr(t_session, "authoritative_max_hp", None)
+                    synced_hp = int(new_hp)
+                    if max_hp is not None:
+                        synced_hp = min(max(0, synced_hp), int(max_hp))
+                    else:
+                        synced_hp = max(0, synced_hp)
+                    t_session.authoritative_current_hp = synced_hp
+
                 print(f"[AI Attack] Hit! Applying {damage} dmg to Player {target_id}. HP: {current_hp} -> {new_hp}")
                 
                 # Send 0x3A Health Update
