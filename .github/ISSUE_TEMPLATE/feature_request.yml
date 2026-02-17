@@ -1,8 +1,7 @@
 name: Feature Request
 description: Suggest an idea for this project.
-labels: ["feature"]
-assignees:
-  ["Telahair", "Neodevils", "michii18", "ekmekler", "DarkneesGlow", "dullK-jpg"]
+assignees: ["michii18", "dullK-jpg"]
+type: "Feature"
 body:
   - type: textarea
     id: feature-description
