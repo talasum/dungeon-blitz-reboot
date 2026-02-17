@@ -4,6 +4,7 @@ labels: ["bug"]
 assignees:
   ["Telahair", "Neodevils", "michii18", "ekmekler", "DarkneesGlow", "dullK-jpg"]
 projects: ["minesa-org/20"]
+type: "Bug"
 body:
   - type: markdown
     attributes:
