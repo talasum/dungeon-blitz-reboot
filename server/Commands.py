@@ -1,5 +1,8 @@
+import json
+import os
 import struct
 import random
+import re
 import time
 
 from bitreader import BitReader
@@ -11,6 +14,949 @@ from accounts import save_characters
 from globals import send_gold_reward, send_gear_reward, send_hp_update, send_material_reward, GS, send_npc_dialog, send_consumable_reward, send_charm_reward, send_mount_reward, send_dye_reward, send_new_pet_packet, get_npc_props
 from game_data import get_random_gear_id
 from data.npc_chats import NPC_CHATS
+
+# ── SPECIAL STORY NPCs ──
+# These NPCs have unique sequential dialog that should NEVER be replaced with generic NPC chat.
+# They form part of a narrative sequence and must maintain story integrity.
+# Dialog starters match their placement:
+#   - lubu: "Third Place, LuBu."
+#   - clintt: "First Place, Clintt."
+#   - purplered: "First Place, PurpleRed."
+#   - jeromelin: "Fourth Place, JeromeLin."
+LOCKED_HALLOWEEN_STATUE_DIALOGS = {
+    "clintt": (
+        "First Place, Clintt.",
+        "Her mastery of magic...",
+        "And prowess with a staff.",
+        "Shamed the Green Knight...",
+        "And gave her the last laugh.",
+    ),
+    "purplered": (
+        "First Place, PurpleRed.",
+        "With arcane power and skill...",
+        "The Green Knight did she slay.",
+        "Now Purple and Red...",
+        "Are the colors of the day.",
+    ),
+    "lubu": (
+        "Third Place, LuBu.",
+        "With divine might in his arms...",
+        "And holy vengeance in his swing...",
+        "LuBu cut down the Green Knight.",
+        "For glory and his King.",
+    ),
+    "jeromelin": (
+        "Fourth Place, JeromeLin.",
+        "From the shadows he struck...",
+        "His blade quick and true.",
+        "JeromeLin beat the Green Knight...",
+        "Many more time than did you.",
+    ),
+}
+STORY_NPCS = ["clintt", "lubu", "purplered", "jeromelin"]
+STORY_NPC_LEVEL_PREFIX = "swamproadnorth"
+WORLD_NPCS_DIR = os.path.join(os.path.dirname(__file__), "world_npcs")
+STORY_NPC_ALIASES = {
+    "specialhalloweenstatuethird": "lubu",
+    "specialhalloweenstatuethirdhard": "lubu",
+    "specialhalloweenstatuefirst": "clintt",
+    "specialhalloweenstatuefirsthard": "clintt",
+    "specialhalloweenstatuesecond": "purplered",
+    "specialhalloweenstatuesecondhard": "purplered",
+    "specialhalloweenstatuefourth": "jeromelin",
+    "specialhalloweenstatuefourthhard": "jeromelin",
+}
+STORY_STATUE_RELATIVE_INDICES = {
+    27: "lubu",
+    31: "purplered",
+    32: "clintt",
+    33: "jeromelin",
+}
+STORY_STATUE_TIEBREAK = {
+    "clintt": 0,
+    "purplered": 1,
+    "lubu": 2,
+    "jeromelin": 3,
+}
+
+# ── GLOBAL STORY NPC STATE ──
+# Stores dialog history for Story NPCs per CHARACTER (NOT per level).
+# This ensures the sequence survives zone/level changes.
+# Format: { "char_id": { "npc_key": ["line1", "line2", ...] } }
+# When a player changes zones, their character_id stays the same, so history is preserved.
+GLOBAL_STORY_NPC_HISTORY = {}
+
+# Tracks the next dialogue index per Story NPC per character.
+# Format: { "char_id": { "npc_key": next_index } }
+# Story NPC lines do NOT cycle back to the start.
+GLOBAL_STORY_NPC_PROGRESS = {}
+
+# Stores NPC ID mappings for quick lookup per character.
+# Format: { "char_id": { "npc_key": npc_id } }
+STORY_NPC_ID_REGISTRY = {}
+
+# Stores non-story NPC dialog runtime state per character.
+# Format:
+# {
+#   "char_id": {
+#       "npc_key": {
+#           "remaining": ["line_a", "line_b", ...],
+#           "last": "line_z",
+#           "history": ["line_1", "line_2", ...]
+#       }
+#   }
+# }
+GLOBAL_REGULAR_NPC_STATE = {}
+
+MAX_REGULAR_CHAT_HISTORY = 120
+
+GENERIC_ROLE_CHAT_ALIASES = {
+    "merchant": "merchant",
+    "trainer": "trainer",
+    "guard": "guard",
+    "imperialguard": "imperialguard",
+    "villager": "villager",
+    "citizen": "citizen",
+    "acolyte": "acolyte",
+    "monk": "monk",
+    "nomad": "nomad",
+    "slave": "slave",
+    # No dedicated "mayor" chat pool exists in data.npc_chats, so map to villager.
+    "mayor": "villager",
+}
+
+ROLE_DIALOG_EXTENSIONS = {
+    "villager": [
+        "The roads feel calmer when heroes are nearby.",
+        "We keep lanterns lit through the night.",
+        "Food has gotten expensive this season.",
+        "People sleep easier after patrols pass.",
+        "Travelers say the old bridge creaks at dawn.",
+        "A quiet morning is a rare blessing lately.",
+        "The healer says rest is as important as steel.",
+        "Everyone here knows someone who needs help.",
+        "The weather turns quickly in these parts.",
+        "A strong shield can save a whole party.",
+    ],
+    "merchant": [
+        "I mark dangerous routes on my trade map.",
+        "Good boots are worth every coin on long roads.",
+        "Prices rise when caravans go missing.",
+        "A repaired buckle can save an entire set of armor.",
+        "Potion demand always spikes after stormy nights.",
+        "I buy in bulk when escort guards are available.",
+        "Steel and salt move faster than silk these days.",
+        "Adventurers prefer supplies they can trust.",
+        "Reliable ropes sell out before mountain runs.",
+        "A smart buyer plans for the return trip too.",
+    ],
+    "trainer": [
+        "Footwork first, power second.",
+        "A clean block is better than a reckless swing.",
+        "Recover your stance after every strike.",
+        "Watch your timing, not just your target.",
+        "Controlled breathing wins long fights.",
+        "Training is repetition done with focus.",
+        "Your guard should move before your fear does.",
+        "Discipline is built between battles.",
+        "Never waste motion when you can stay efficient.",
+        "Learn the terrain before blades are drawn.",
+    ],
+    "guard": [
+        "We rotate watch posts every few hours.",
+        "Report unusual tracks as soon as you spot them.",
+        "Night watch has been extended this week.",
+        "Checkpoints stay active until sunrise.",
+        "We escort families before we escort cargo.",
+        "Suspicious movement gets logged immediately.",
+        "Stay inside the marked routes after dark.",
+        "Barricades hold better when people stay calm.",
+        "Our patrol lines overlap for a reason.",
+        "Keep your torch dry and your route simple.",
+    ],
+    "imperialguard": [
+        "Imperial patrols are enforcing strict route checks.",
+        "Orders are clear: protect civilians first.",
+        "Discipline keeps this region standing.",
+        "Keep your papers ready at major gates.",
+        "Unauthorized movement is being tracked.",
+        "We hold formation even under pressure.",
+        "The Empire expects clean reports from every post.",
+        "Security drills are mandatory this month.",
+        "Supplies are protected by armed convoy.",
+        "Alert commands will not be repeated twice.",
+    ],
+    "citizen": [
+        "The market opens early when roads are safe.",
+        "Families plan around the patrol bell now.",
+        "Work never stops, but rumors travel faster.",
+        "Most folks avoid side streets after sunset.",
+        "People trade news while waiting in line.",
+        "Repairs are happening all across town.",
+        "Crowds gather quickly when guards pass by.",
+        "Every district has its own worries these days.",
+        "Nobody forgets the sound of last week's alarm.",
+        "Routine keeps people steady.",
+    ],
+    "acolyte": [
+        "Quiet prayer helps in uncertain times.",
+        "We tend the wounded until dawn when needed.",
+        "Light and patience carry many burdens.",
+        "Take water and rest before your next mission.",
+        "Mercy is strongest when it is practical.",
+        "Keep hope alive through small acts.",
+        "The shrine doors remain open to all travelers.",
+        "Healing takes time and discipline.",
+        "Peace begins with measured steps.",
+        "Even warriors need stillness.",
+    ],
+    "monk": [
+        "A calm mind sharpens every technique.",
+        "Balance is trained, not gifted.",
+        "Silence often reveals the safest path.",
+        "Strength without control burns out quickly.",
+        "Patience is a weapon too.",
+        "Study your breath before your blade.",
+        "Harmony in movement prevents mistakes.",
+        "Awareness protects better than anger.",
+        "Steady hands come from steady thoughts.",
+        "A focused spirit endures longer.",
+    ],
+    "nomad": [
+        "We move where water and safety allow.",
+        "Campfires are small when the winds are loud.",
+        "Routes shift with every season.",
+        "Travel light and plan two exits.",
+        "Tracks tell stories if you read them early.",
+        "Sand and mud both hide danger well.",
+        "Caravans survive by staying adaptable.",
+        "A good scout is worth more than a fast horse.",
+        "Never ignore a sudden silence on the road.",
+        "Map the shade before you map the distance.",
+    ],
+    "slave": [
+        "We keep working, one hour at a time.",
+        "A kind word still matters in hard places.",
+        "People survive by helping quietly.",
+        "We notice who stands up for others.",
+        "Even small relief can change a day.",
+        "Some wounds are not visible right away.",
+        "Hope is stubborn when shared.",
+        "Strength is not always loud.",
+        "Most people here just want safety.",
+        "Respect costs nothing and means everything.",
+    ],
+    "default": [
+        "Keep your gear ready before leaving town.",
+        "Shortcuts are usually the most expensive path.",
+        "Scouts say activity increases near dusk.",
+        "A prepared group returns home.",
+        "Most threats are easier to avoid than fight.",
+        "The safest route is the one you can explain.",
+        "Carry extra supplies for unexpected delays.",
+        "Good information is worth more than rumors.",
+        "Stay alert and travel with purpose.",
+        "Every region has its own kind of trouble.",
+    ],
+}
+
+# Additional mission-focused chatter injected for all mission-related NPCs.
+QUEST_MISSION_DIALOG_EXTENSIONS = [
+    "Check your mission tracker for the next objective.",
+    "Report back after you complete the current task.",
+    "Missions unlock routes, services, and useful contacts.",
+    "If progress seems stuck, revisit your quest giver.",
+    "Some tasks require talking to multiple NPCs in sequence.",
+    "Mission updates help us keep the roads secure.",
+    "Objectives can change after each completed step.",
+    "If enemies feel too strong, finish pending missions first.",
+    "Always verify whether you must return to complete the quest.",
+    "Critical rewards are often tied to mission hand-ins.",
+    "The mission board reflects your latest progress.",
+    "A clear objective is better than a rushed detour.",
+    "Coordinate with nearby NPCs before heading out.",
+    "Completing missions keeps this region stable.",
+    "Mission chains are easier when handled one step at a time.",
+]
+
+QUEST_MISSION_NAMED_DIALOG_TEMPLATES = [
+    "{name} says your next objective is already in the tracker.",
+    "{name} says this task is not complete until you report back.",
+    "{name} says mission progress depends on the right sequence.",
+    "{name} says you should finish current quests before taking new ones.",
+    "{name} says the next mission contact is marked for you.",
+    "{name} says they are waiting for your mission update.",
+    "{name} says this region improves as mission work gets done.",
+    "{name} says your best lead is the active quest objective.",
+    "{name} says the board has new details after recent progress.",
+    "{name} says returning to the quest giver is mandatory.",
+]
+
+def _build_mission_npc_keys():
+    mission_file = os.path.join(os.path.dirname(__file__), "data", "MissionTypes.json")
+    if not os.path.isfile(mission_file):
+        return set()
+
+    try:
+        with open(mission_file, "r", encoding="utf-8") as f:
+            rows = json.load(f)
+    except Exception:
+        return set()
+
+    keys = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        for field_name in ("ContactName", "ReturnName"):
+            raw_name = row.get(field_name)
+            normalized = str(raw_name or "").replace(" ", "").replace("_", "").lower()
+            if not normalized:
+                continue
+
+            keys.add(normalized)
+            keys.add(re.sub(r"\d+$", "", normalized))
+
+            if normalized.endswith("hard"):
+                no_hard = normalized[:-4]
+                keys.add(no_hard)
+                keys.add(re.sub(r"\d+$", "", no_hard))
+
+    keys.discard("")
+    return keys
+
+MISSION_NPC_KEYS = _build_mission_npc_keys()
+
+def _build_level_interactable_index_maps():
+    maps = {}
+    if not os.path.isdir(WORLD_NPCS_DIR):
+        return maps
+
+    for filename in os.listdir(WORLD_NPCS_DIR):
+        if not filename.lower().endswith(".json"):
+            continue
+
+        level_key = filename[:-5].strip().lower()
+        json_path = os.path.join(WORLD_NPCS_DIR, filename)
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+
+        level_map = {}
+        for npc in data:
+            if not isinstance(npc, dict):
+                continue
+            if int(npc.get("team", 0) or 0) != 3:
+                continue
+
+            character_name = (npc.get("character_name") or "").strip()
+            if not character_name:
+                continue
+
+            npc_id = int(npc.get("id", 0) or 0)
+            if npc_id <= 0:
+                continue
+
+            idx = npc_id >> 16
+            normalized_name = character_name.replace(" ", "").replace("_", "").lower()
+            if normalized_name:
+                level_map[idx] = normalized_name
+
+        if level_map:
+            maps[level_key] = level_map
+
+    return maps
+
+LEVEL_INTERACTABLE_INDEX_MAPS = _build_level_interactable_index_maps()
+
+def _ensure_story_npc_state(char_id):
+    """Initialize per-character Story NPC state containers if missing."""
+    if char_id not in GLOBAL_STORY_NPC_HISTORY:
+        GLOBAL_STORY_NPC_HISTORY[char_id] = {}
+    if char_id not in GLOBAL_STORY_NPC_PROGRESS:
+        GLOBAL_STORY_NPC_PROGRESS[char_id] = {}
+    if char_id not in STORY_NPC_ID_REGISTRY:
+        STORY_NPC_ID_REGISTRY[char_id] = {}
+
+def _get_story_npc_lines(npc_key):
+    # Keep the 4 SwampRoadNorth Halloween statues fully isolated from NPC_CHATS edits.
+    if npc_key in LOCKED_HALLOWEEN_STATUE_DIALOGS:
+        return list(LOCKED_HALLOWEEN_STATUE_DIALOGS[npc_key])
+    return NPC_CHATS.get(npc_key, ["..."])
+
+def _send_story_npc_dialog(session, npc_id, npc_key, source_tag):
+    """
+    Send the next Story NPC line without depending on clientEntID.
+    Once all lines are consumed, do not repeat.
+    """
+    char_id = session.current_character or "unknown"
+    _ensure_story_npc_state(char_id)
+    level_name = getattr(session, "current_level", None)
+
+    STORY_NPC_ID_REGISTRY[char_id][npc_key] = npc_id
+    if _is_story_npc_level(level_name):
+        _cache_story_statue_id(session, level_name, npc_id, npc_key)
+        client_ent_id = getattr(session, "clientEntID", None)
+        if isinstance(client_ent_id, int) and client_ent_id > 0:
+            _cache_story_player_idx(session, level_name, client_ent_id >> 16)
+
+    all_lines = _get_story_npc_lines(npc_key)
+    next_index = GLOBAL_STORY_NPC_PROGRESS[char_id].get(npc_key, 0)
+
+    if next_index >= len(all_lines):
+        print(
+            f"[{session.addr}] [PKT0x7A] STORY NPC ({source_tag}) {npc_key}: "
+            f"dialog exhausted, skipping repeat (Character: {char_id})"
+        )
+        return
+
+    text = all_lines[next_index]
+    GLOBAL_STORY_NPC_PROGRESS[char_id][npc_key] = next_index + 1
+
+    seen = GLOBAL_STORY_NPC_HISTORY[char_id].get(npc_key, [])
+    if text not in seen:
+        seen.append(text)
+    GLOBAL_STORY_NPC_HISTORY[char_id][npc_key] = seen
+
+    if not hasattr(session, "_npc_chat_history"):
+        session._npc_chat_history = {}
+    session._npc_chat_history[npc_key] = list(seen)
+
+    send_npc_dialog(session, npc_id, text)
+    print(
+        f"[{session.addr}] [PKT0x7A] STORY NPC ({source_tag}) {npc_key}: \"{text}\" "
+        f"(Character: {char_id}, Line {next_index + 1}/{len(all_lines)})"
+    )
+
+def _ensure_regular_npc_state(char_id):
+    if char_id not in GLOBAL_REGULAR_NPC_STATE:
+        GLOBAL_REGULAR_NPC_STATE[char_id] = {}
+
+def _norm_npc_key(value):
+    return (value or "").replace(" ", "").replace("_", "").lower()
+
+def _canonical_story_npc_key(value):
+    key = _norm_npc_key(value)
+    if key in STORY_NPCS:
+        return key
+    return STORY_NPC_ALIASES.get(key)
+
+def _norm_identity_name(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+def _level_cache_key(level_name):
+    return (level_name or "").strip().lower()
+
+def _ensure_story_level_cache(session, attr_name):
+    cache = getattr(session, attr_name, None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(session, attr_name, cache)
+    return cache
+
+def _cache_story_player_idx(session, level_name, player_idx):
+    try:
+        idx = int(player_idx)
+    except Exception:
+        return
+    cache = _ensure_story_level_cache(session, "_story_player_idx_by_level")
+    cache[_level_cache_key(level_name)] = idx
+
+def _get_cached_story_player_idx(session, level_name):
+    cache = _ensure_story_level_cache(session, "_story_player_idx_by_level")
+    value = cache.get(_level_cache_key(level_name))
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+def _cache_story_statue_id(session, level_name, npc_id, story_key):
+    if story_key not in STORY_NPCS:
+        return
+    try:
+        nid = int(npc_id)
+    except Exception:
+        return
+    top = _ensure_story_level_cache(session, "_story_statue_id_cache")
+    lvl = top.setdefault(_level_cache_key(level_name), {})
+    if not isinstance(lvl, dict):
+        lvl = {}
+        top[_level_cache_key(level_name)] = lvl
+    lvl[nid] = story_key
+
+def _get_cached_story_statue_key(session, level_name, npc_id):
+    try:
+        nid = int(npc_id)
+    except Exception:
+        return None
+    top = _ensure_story_level_cache(session, "_story_statue_id_cache")
+    lvl = top.get(_level_cache_key(level_name))
+    if not isinstance(lvl, dict):
+        return None
+    story_key = lvl.get(nid)
+    return story_key if story_key in STORY_NPCS else None
+
+def _get_story_statue_relative_indices(level_name):
+    if not _is_story_npc_level(level_name):
+        return {}
+    return STORY_STATUE_RELATIVE_INDICES
+
+def _resolve_active_client_ent_id(session, level_name):
+    if not _is_story_npc_level(level_name):
+        return None
+
+    current_name_norm = _norm_identity_name(getattr(session, "current_character", None))
+    known_eid = getattr(session, "clientEntID", None)
+    entities = getattr(session, "entities", {})
+
+    if isinstance(known_eid, int) and known_eid > 0 and isinstance(entities, dict):
+        ent = entities.get(known_eid)
+        if isinstance(ent, dict) and ent.get("is_player"):
+            ent_name = ent.get("ent_name") or ent.get("name")
+            if not current_name_norm or _norm_identity_name(ent_name) == current_name_norm:
+                _cache_story_player_idx(session, level_name, known_eid >> 16)
+                return known_eid
+
+    if not isinstance(entities, dict):
+        return None
+
+    for entity_id, ent in entities.items():
+        if not isinstance(ent, dict):
+            continue
+        if not ent.get("is_player"):
+            continue
+        ent_name = ent.get("ent_name") or ent.get("name")
+        if current_name_norm and _norm_identity_name(ent_name) != current_name_norm:
+            continue
+        try:
+            eid = int(entity_id)
+        except Exception:
+            continue
+        _cache_story_player_idx(session, level_name, eid >> 16)
+        return eid
+
+    return None
+
+def _select_story_candidate(candidates):
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], STORY_STATUE_TIEBREAK.get(item[1], 99)))
+    return candidates[0]
+
+def _resolve_story_key_by_relative_idx(npc_id, client_ent_id, level_name, tolerance=1):
+    story_indices = _get_story_statue_relative_indices(level_name)
+    if not story_indices:
+        return None, None
+
+    try:
+        relative_idx = (int(npc_id) - int(client_ent_id)) >> 16
+    except Exception:
+        return None, None
+
+    candidates = []
+    for idx, story_key in story_indices.items():
+        delta = abs(relative_idx - idx)
+        if delta <= tolerance:
+            candidates.append((delta, story_key, idx))
+
+    selected = _select_story_candidate(candidates)
+    if not selected:
+        return None, relative_idx
+
+    _, story_key, matched_idx = selected
+    return story_key, matched_idx
+
+def _resolve_story_key_by_player_idx(npc_id, player_idx, level_name, tolerance=1):
+    story_indices = _get_story_statue_relative_indices(level_name)
+    if not story_indices:
+        return None, None
+
+    try:
+        relative_idx = (int(npc_id) >> 16) - int(player_idx)
+    except Exception:
+        return None, None
+
+    candidates = []
+    for idx, story_key in story_indices.items():
+        delta = abs(relative_idx - idx)
+        if delta <= tolerance:
+            candidates.append((delta, story_key, idx))
+
+    selected = _select_story_candidate(candidates)
+    if not selected:
+        return None, relative_idx
+
+    _, story_key, matched_idx = selected
+    return story_key, matched_idx
+
+def _guess_story_key_nearest(npc_id, level_name, baseline_player_idx=None):
+    story_indices = _get_story_statue_relative_indices(level_name)
+    if not story_indices:
+        return None, None
+
+    npc_abs_idx = int(npc_id) >> 16
+    if baseline_player_idx is None:
+        # Deterministic default keeps guesses stable when no player index is available.
+        baseline_player_idx = npc_abs_idx - 32
+
+    candidates = []
+    for rel_idx, story_key in story_indices.items():
+        score = abs((npc_abs_idx - rel_idx) - baseline_player_idx)
+        candidates.append((score, story_key, rel_idx))
+
+    selected = _select_story_candidate(candidates)
+    if not selected:
+        return None, baseline_player_idx
+
+    _, story_key, _ = selected
+    return story_key, baseline_player_idx
+
+def _resolve_locked_story_npc_key(session, npc_id, level_name, npc=None, client_ent_id=None):
+    if not _is_story_npc_level(level_name):
+        return None, None
+
+    # Try direct identity fields first.
+    candidate_names = []
+
+    def add_candidate(value):
+        normalized = _norm_npc_key(value)
+        if normalized and normalized not in candidate_names:
+            candidate_names.append(normalized)
+
+    if isinstance(npc, dict):
+        add_candidate(npc.get("character_name"))
+        cue_data = npc.get("cue_data") or {}
+        if isinstance(cue_data, dict):
+            add_candidate(cue_data.get("character_name"))
+        add_candidate(npc.get("entType"))
+        add_candidate(npc.get("name"))
+
+    for source in candidate_names:
+        for candidate in _derive_npc_lookup_keys(source):
+            canonical = _canonical_story_npc_key(candidate)
+            if canonical:
+                _cache_story_statue_id(session, level_name, npc_id, canonical)
+                return canonical, "LOCKED-IDENTITY"
+
+    # If we already have a specific non-statue identity, do not force index fallback.
+    # This avoids accidental statue resolution for nearby non-story NPC indices.
+    if candidate_names and not any("halloweenstatue" in name for name in candidate_names):
+        return None, None
+
+    # Stage 2: runtime cache (npc_id -> story_key) for this level.
+    cached_story_key = _get_cached_story_statue_key(session, level_name, npc_id)
+    if cached_story_key:
+        return cached_story_key, "LOCKED-INDEX"
+
+    # Stage 3: resolve using active (validated) clientEntID.
+    active_client_ent_id = _resolve_active_client_ent_id(session, level_name)
+    if active_client_ent_id is not None:
+        story_key, _ = _resolve_story_key_by_relative_idx(
+            npc_id,
+            active_client_ent_id,
+            level_name,
+            tolerance=1,
+        )
+        if story_key:
+            _cache_story_player_idx(session, level_name, active_client_ent_id >> 16)
+            _cache_story_statue_id(session, level_name, npc_id, story_key)
+            return story_key, "LOCKED-INDEX"
+
+    # Stage 4: resolve from cached player index for the same level.
+    cached_player_idx = _get_cached_story_player_idx(session, level_name)
+    if cached_player_idx is not None:
+        story_key, _ = _resolve_story_key_by_player_idx(
+            npc_id,
+            cached_player_idx,
+            level_name,
+            tolerance=1,
+        )
+        if story_key:
+            _cache_story_statue_id(session, level_name, npc_id, story_key)
+            return story_key, "LOCKED-INDEX"
+
+    # Stage 5: nearest deterministic guess (never generic for these statues).
+    baseline_player_idx = None
+    if active_client_ent_id is not None:
+        baseline_player_idx = active_client_ent_id >> 16
+    elif cached_player_idx is not None:
+        baseline_player_idx = cached_player_idx
+    elif isinstance(client_ent_id, int) and client_ent_id > 0:
+        baseline_player_idx = client_ent_id >> 16
+
+    guessed_story_key, guessed_player_idx = _guess_story_key_nearest(
+        npc_id,
+        level_name,
+        baseline_player_idx=baseline_player_idx,
+    )
+    if guessed_story_key:
+        if guessed_player_idx is not None:
+            _cache_story_player_idx(session, level_name, guessed_player_idx)
+        _cache_story_statue_id(session, level_name, npc_id, guessed_story_key)
+        return guessed_story_key, "LOCKED-GUESS"
+
+    return None, None
+
+def _derive_npc_lookup_keys(npc_type_norm):
+    keys = []
+
+    def add(k):
+        if k and k not in keys:
+            keys.append(k)
+
+    add(npc_type_norm)
+    add(re.sub(r"\d+$", "", npc_type_norm))
+
+    for key in list(keys):
+        if key.endswith("hard"):
+            no_hard = key[:-4]
+            add(no_hard)
+            add(re.sub(r"\d+$", "", no_hard))
+
+    return keys
+
+def _humanize_npc_display_name(raw_name):
+    text = (raw_name or "").strip()
+    if not text:
+        return "Traveler"
+
+    text = re.sub(r"hard$", "", text, flags=re.IGNORECASE)
+    text = text.replace("_", " ")
+    text = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text)
+    text = re.sub(r"\d+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or "Traveler"
+
+def _guess_generic_npc_chat_key(npc_key):
+    normalized = _norm_npc_key(npc_key)
+    for token, chat_key in GENERIC_ROLE_CHAT_ALIASES.items():
+        if token in normalized:
+            return chat_key
+    return "villager"
+
+def _resolve_regular_npc_chat_key(raw_name, npc_id=None):
+    lookup_keys = _derive_npc_lookup_keys(_norm_npc_key(raw_name))
+
+    for key in lookup_keys:
+        if key in NPC_CHATS:
+            return key
+
+    guessed = _guess_generic_npc_chat_key(lookup_keys[0] if lookup_keys else raw_name)
+    if guessed in NPC_CHATS:
+        return guessed
+
+    if lookup_keys:
+        return lookup_keys[0]
+
+    if npc_id is not None:
+        return f"unknownnpc{npc_id}"
+    return "unknownnpc"
+
+def _is_mission_npc(npc_key, raw_name=None):
+    candidate_sources = [npc_key, raw_name]
+    for source in candidate_sources:
+        normalized = _norm_npc_key(source)
+        if not normalized:
+            continue
+
+        for candidate in _derive_npc_lookup_keys(normalized):
+            if candidate not in MISSION_NPC_KEYS:
+                continue
+            # Preserve special 4-player Story NPC flow exactly as-is.
+            if _canonical_story_npc_key(candidate):
+                continue
+            return True
+    return False
+
+def _get_role_dialog_extensions(npc_key, raw_name=None):
+    role_key = npc_key if npc_key in ROLE_DIALOG_EXTENSIONS else _guess_generic_npc_chat_key(raw_name or npc_key)
+    merged = []
+    for source_key in (role_key, "default"):
+        for line in ROLE_DIALOG_EXTENSIONS.get(source_key, []):
+            if line and line not in merged:
+                merged.append(line)
+    return merged
+
+def _get_mission_dialog_extensions(npc_key, raw_name=None):
+    if not _is_mission_npc(npc_key, raw_name):
+        return []
+
+    merged = []
+    for line in QUEST_MISSION_DIALOG_EXTENSIONS:
+        if line and line not in merged:
+            merged.append(line)
+
+    display = _humanize_npc_display_name(raw_name or npc_key)
+    for template in QUEST_MISSION_NAMED_DIALOG_TEMPLATES:
+        line = template.format(name=display)
+        if line and line not in merged:
+            merged.append(line)
+
+    return merged
+
+def _build_npc_dialog_pool(npc_key, raw_name=None):
+    explicit_lines = NPC_CHATS.get(npc_key, [])
+    merged = []
+    for line in explicit_lines:
+        if line and line not in merged:
+            merged.append(line)
+
+    if not merged:
+        fallback_key = _guess_generic_npc_chat_key(raw_name or npc_key)
+        fallback_lines = NPC_CHATS.get(fallback_key, [])
+        for line in fallback_lines:
+            if line and line not in merged:
+                merged.append(line)
+
+    for line in _get_role_dialog_extensions(npc_key, raw_name):
+        if line and line not in merged:
+            merged.append(line)
+
+    for line in _get_mission_dialog_extensions(npc_key, raw_name):
+        if line and line not in merged:
+            merged.append(line)
+
+    if not merged:
+        display = _humanize_npc_display_name(raw_name or npc_key)
+        merged.append(f"{display} nods in silence.")
+
+    return merged
+
+def _build_non_repeating_cycle(all_lines, last_line=None):
+    unique_lines = []
+    for line in all_lines:
+        if line and line not in unique_lines:
+            unique_lines.append(line)
+
+    if len(unique_lines) <= 1:
+        return unique_lines
+
+    cycle = list(unique_lines)
+    random.shuffle(cycle)
+
+    if last_line and cycle[0] == last_line:
+        for i in range(1, len(cycle)):
+            if cycle[i] != last_line:
+                cycle[0], cycle[i] = cycle[i], cycle[0]
+                break
+
+    return cycle
+
+def _send_regular_npc_dialog(session, npc_id, npc_key, all_lines, source_tag, raw_name=None):
+    char_id = session.current_character or "unknown"
+    _ensure_regular_npc_state(char_id)
+
+    char_state = GLOBAL_REGULAR_NPC_STATE[char_id]
+    npc_state = char_state.get(npc_key, {"remaining": [], "last": None, "history": []})
+
+    remaining = list(npc_state.get("remaining", []))
+    last_line = npc_state.get("last")
+    if not remaining:
+        remaining = _build_non_repeating_cycle(all_lines, last_line=last_line)
+        if not remaining:
+            print(
+                f"[{session.addr}] [PKT0x7A] NPC ({source_tag}) {npc_key}: "
+                f"no dialog lines available (Character: {char_id})"
+            )
+            return False
+
+    text = remaining.pop(0)
+    history = list(npc_state.get("history", []))
+    history.append(text)
+    if len(history) > MAX_REGULAR_CHAT_HISTORY:
+        history = history[-MAX_REGULAR_CHAT_HISTORY:]
+
+    npc_state["remaining"] = remaining
+    npc_state["last"] = text
+    npc_state["history"] = history
+    char_state[npc_key] = npc_state
+
+    if not hasattr(session, "_npc_chat_history"):
+        session._npc_chat_history = {}
+    session._npc_chat_history[npc_key] = list(history)
+
+    send_npc_dialog(session, npc_id, text)
+    print(
+        f"[{session.addr}] [PKT0x7A] NPC ({source_tag}) {npc_key}: \"{text}\" "
+        f"(Character: {char_id}, Seen={len(history)}, RemainingCycle={len(remaining)})"
+    )
+    return True
+
+def _is_story_npc_level(level_name):
+    return (level_name or "").strip().lower().startswith(STORY_NPC_LEVEL_PREFIX)
+
+def _get_level_index_map(level_name):
+    normalized = (level_name or "").strip().lower()
+    if not normalized:
+        return None
+
+    exact = LEVEL_INTERACTABLE_INDEX_MAPS.get(normalized)
+    if exact:
+        return exact
+
+    if normalized.endswith("hard"):
+        return LEVEL_INTERACTABLE_INDEX_MAPS.get(normalized[:-4])
+
+    return None
+
+def _resolve_index_mapped_npc_name(npc_id, level_name, client_ent_id=None, story_only=False):
+    level_map = _get_level_index_map(level_name)
+    if not level_map:
+        return None, -1
+
+    min_known_idx = min(level_map)
+    max_known_idx = max(level_map)
+
+    base_candidates = []
+    absolute_idx = npc_id >> 16
+    base_candidates.append(absolute_idx)
+
+    if client_ent_id is not None:
+        try:
+            client_idx = int(client_ent_id) >> 16
+            relative_idx = absolute_idx - client_idx
+            if relative_idx not in base_candidates:
+                base_candidates.insert(0, relative_idx)
+        except Exception:
+            pass
+
+    seen_indices = set()
+
+    for base_idx in base_candidates:
+        for delta in (0, -1, 1):
+            start_idx = base_idx + delta
+
+            idx = start_idx
+            while idx >= min_known_idx:
+                if idx not in seen_indices:
+                    seen_indices.add(idx)
+                    name = level_map.get(idx)
+                    if name:
+                        if story_only:
+                            story_key = _canonical_story_npc_key(name)
+                            if story_key:
+                                return story_key, idx
+                        else:
+                            return name, idx
+                idx -= 186
+
+            idx = start_idx + 186
+            while idx <= max_known_idx:
+                if idx not in seen_indices:
+                    seen_indices.add(idx)
+                    name = level_map.get(idx)
+                    if name:
+                        if story_only:
+                            story_key = _canonical_story_npc_key(name)
+                            if story_key:
+                                return story_key, idx
+                        else:
+                            return name, idx
+                idx += 186
+
+    return None, -1
 
 def handle_dungeon_run_report(session, data):
     br = BitReader(data[4:])
@@ -351,27 +1297,110 @@ def handle_talk_to_npc(session, data):
 
     br = BitReader(data[4:])
     npc_id = br.read_method_9()
+    level_name = getattr(session, "current_level", None)
 
     npc = session.entities.get(npc_id)
     if not npc:
         # Fallback for client-spawned levels (NewbieRoad, etc.)
         # where NPCs exist in static data but not in session.entities
-        from globals import get_npc_props
         npc = get_npc_props(session.current_level, npc_id)
 
+    # Absolute lock for SwampRoadNorth Halloween ranking statues.
+    locked_story_key, locked_source = _resolve_locked_story_npc_key(
+        session,
+        npc_id,
+        level_name,
+        npc=npc,
+        client_ent_id=getattr(session, "clientEntID", None),
+    )
+    if locked_story_key:
+        _send_story_npc_dialog(session, npc_id, locked_story_key, locked_source)
+        return
+
+    # Fallback for client-side static NPCs (baked into Flash SWF)
     if not npc:
-        print(f"[{session.addr}] [PKT0x7A] Unknown NPC ID {npc_id}. Available: {list(session.entities.keys())}")
+        if _is_story_npc_level(level_name):
+            base_idx = npc_id >> 16
+            print(
+                f"[{session.addr}] [PKT0x7A] STORY NPC resolve miss in {level_name}: "
+                f"npc_id={npc_id}, base_idx={base_idx}, mod186={base_idx % 186}"
+            )
+
+        mapped_name, _ = _resolve_index_mapped_npc_name(
+            npc_id,
+            level_name,
+            client_ent_id=getattr(session, "clientEntID", None),
+        )
+        if mapped_name:
+            story_key = _canonical_story_npc_key(mapped_name)
+            if story_key:
+                _send_story_npc_dialog(session, npc_id, story_key, "INDEX-FALLBACK")
+                return
+            npc_key = _resolve_regular_npc_chat_key(mapped_name, npc_id=npc_id)
+            mapped_lines = _build_npc_dialog_pool(npc_key, mapped_name)
+            _send_regular_npc_dialog(
+                session,
+                npc_id,
+                npc_key,
+                mapped_lines,
+                "INDEX-FALLBACK",
+                raw_name=mapped_name,
+            )
+            return
+
+        if _is_story_npc_level(level_name):
+            # Hard guarantee: story statues in SwampRoadNorth should never fall back to generic unknown chat.
+            guessed_story_key, _ = _guess_story_key_nearest(
+                npc_id,
+                level_name,
+                baseline_player_idx=_get_cached_story_player_idx(session, level_name),
+            )
+            if guessed_story_key:
+                _cache_story_statue_id(session, level_name, npc_id, guessed_story_key)
+                _send_story_npc_dialog(session, npc_id, guessed_story_key, "LOCKED-GUESS")
+            else:
+                print(
+                    f"[{session.addr}] [PKT0x7A] STORY NPC unresolved in {level_name}: "
+                    f"npc_id={npc_id} (generic fallback blocked)"
+                )
+            return
+
+        unknown_key = f"unknownnpc{npc_id}"
+        unknown_lines = _build_npc_dialog_pool(unknown_key, "Wanderer")
+        _send_regular_npc_dialog(
+            session,
+            npc_id,
+            unknown_key,
+            unknown_lines,
+            "UNKNOWN",
+            raw_name="Wanderer",
+        )
         return
 
     # NPC internal type name:
     # This is the ONLY correct name to compare missions with.
-    ent_type = npc.get("character_name") or npc.get("entType") or npc.get("name")
+    ent_type = (
+        npc.get("character_name")
+        or (npc.get("cue_data") or {}).get("character_name")
+        or npc.get("entType")
+        or npc.get("name")
+    )
 
     # Normalize
     def norm(x):
-        return (x or "").replace(" ", "").replace("_", "").lower()
+        return _norm_npc_key(x)
 
     npc_type_norm = norm(ent_type)
+    story_key = None
+    for candidate in _derive_npc_lookup_keys(npc_type_norm):
+        canonical = _canonical_story_npc_key(candidate)
+        if canonical:
+            story_key = canonical
+            break
+
+    if story_key:
+        _send_story_npc_dialog(session, npc_id, story_key, "ENTITY")
+        return
 
     # Default values
     dialogue_id = 0
@@ -436,11 +1465,18 @@ def handle_talk_to_npc(session, data):
 
     # Fallback: Bubble Chat if no mission dialogue is triggered
     if dialogue_id == 0:
-        if npc_type_norm in NPC_CHATS:
-            text = random.choice(NPC_CHATS[npc_type_norm])
-            send_npc_dialog(session, npc_id, text)
-            print(f"[{session.addr}] [PKT0x7A] Bubble Chat {ent_type}: \"{text}\"")
-            return
+        npc_key = _resolve_regular_npc_chat_key(ent_type, npc_id=npc_id)
+        all_lines = _build_npc_dialog_pool(npc_key, ent_type)
+
+        _send_regular_npc_dialog(
+            session,
+            npc_id,
+            npc_key,
+            all_lines,
+            "BUBBLE",
+            raw_name=ent_type,
+        )
+        return
 
     pkt = build_start_skit_packet(npc_id, dialogue_id, mission_id)
     session.conn.sendall(pkt)

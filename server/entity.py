@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import struct
 import threading
 import time
@@ -31,6 +32,8 @@ def _refresh_crafttown_buildings_on_spawn(session):
     for delay in (0.0, 1.2, 2.8):
         _send_once(delay)
 
+def _norm_identity_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
 def _request_client_combat_stats_sync(session):
     if not session or not getattr(session, "conn", None):
@@ -479,6 +482,40 @@ def handle_entity_full_update(session, data):
     b_dropping = bool(br.read_method_15())
     b_backpedal = bool(br.read_method_15())
 
+    # Track client's actual in-world entity ID (not transfer token).
+    # Normalize names to survive case/format differences after transitions.
+    ent_name_norm = _norm_identity_name(ent_name)
+    current_name_norm = _norm_identity_name(getattr(session, "current_character", None))
+    is_self_packet = bool(is_player and current_name_norm and ent_name_norm == current_name_norm)
+
+    should_update_client_eid = False
+    if is_player:
+        if session.clientEntID is None:
+            should_update_client_eid = is_self_packet or not current_name_norm
+        elif is_self_packet and session.clientEntID != entity_id:
+            should_update_client_eid = True
+
+    if should_update_client_eid and session.clientEntID != entity_id:
+        old_client_ent_id = session.clientEntID
+        session.clientEntID = entity_id
+        if old_client_ent_id is None:
+            print(f"[{session.addr}] [PKT08] Learned clientEntID = {entity_id}")
+        else:
+            print(
+                f"[{session.addr}] [PKT08] Updated stale clientEntID: "
+                f"{old_client_ent_id} -> {entity_id}"
+            )
+
+        if getattr(session, "current_level", None):
+            lvl_cache = getattr(session, "_story_player_idx_by_level", None)
+            if not isinstance(lvl_cache, dict):
+                lvl_cache = {}
+                session._story_player_idx_by_level = lvl_cache
+            lvl_cache[str(session.current_level).strip().lower()] = (entity_id >> 16)
+
+        if session.current_level == "CraftTown" and getattr(session, "crafttown_building_refresh_pending", False):
+            _refresh_crafttown_buildings_on_spawn(session)
+            session.crafttown_building_refresh_pending = False
     # Track client's actual in-world entity ID (not transfer token)
     if is_player and (ent_name == session.current_character or session.clientEntID is None):
         if session.clientEntID != entity_id:
@@ -560,10 +597,11 @@ def handle_entity_full_update(session, data):
     level_map = GS.level_entities.setdefault(level, {})
 
     existing_entry = level_map.get(entity_id, {}) if isinstance(level_map.get(entity_id), dict) else {}
+    is_player_name_match = bool(current_name_norm and ent_name_norm == current_name_norm)
     controlled_player = (
         is_player
         or (session.clientEntID is not None and entity_id == session.clientEntID)
-        or (session.current_character and ent_name == session.current_character)
+        or is_player_name_match
     )
     owner_session = session if controlled_player else existing_entry.get("session")
 

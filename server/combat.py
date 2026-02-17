@@ -354,9 +354,19 @@ def handle_power_hit(session, data):
         target["hp"] = new_hp
     else:
         # Unknown target (Client-side mob), skip server HP logic
+        # Check if this damage has already been applied (prevent double damage from client-spawned enemies)
+        current_time = time.monotonic()
+        if target_entity_id in session.entities and session.entities[target_entity_id].get("_last_damage_time") == current_time:
+            print(f"[Combat] Duplicate damage blocked for client-spawned entity {target_entity_id}")
+            return
         current_hp = 100
         new_hp = 100 - damage_value
         ent_name = "Unknown"
+        
+        # Mark this damage as processed
+        if target_entity_id not in session.entities:
+            session.entities[target_entity_id] = {}
+        session.entities[target_entity_id]["_last_damage_time"] = current_time
 
         # print(f"[Combat] Entity {target_entity_id} HP: {current_hp} -> {new_hp}")
 
@@ -560,16 +570,16 @@ def handle_power_hit(session, data):
 
          # Send actual HP loss (negative delta)
          # Note: damage_value is positive, so we send -damage_value
-         send_hp_update(target_player_session, target.get("id"), -damage_value)
+         # send_hp_update(target_player_session, target.get("id"), -damage_value)
 
     # Forward packet unchanged to other clients in same level
-    # If using Client-Side AI (player sends hit for enemy), we must echo it back to the player 
-    # if they are the target so they see the damage.
+    # We MUST NOT echo it back to the sender (session) even if they are the target,
+    # because they already processed the hit locally. Echoing causes double damage visuals.
     for other in GS.all_sessions:
         if (
-                other.player_spawned
+                other is not session
+                and other.player_spawned
                 and other.current_level == session.current_level
-                and (other is not session or target_entity_id == session.clientEntID)
         ):
             other.conn.sendall(data)
 
@@ -581,7 +591,7 @@ def handle_projectile_explode(session, data):
     coordinate_y   = br.read_method_24()
     is_crit        = br.read_method_15()
 
-    # Broadcast unchanged packet to all other players in same level
+    # Broadcast unchanged packet to all other players in same level (No Echo)
     for other in GS.all_sessions:
         if (
             other is not session

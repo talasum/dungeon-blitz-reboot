@@ -422,7 +422,14 @@ def Player_Data_Packet(char: dict,
             buf.write_method_6(slot_id, class_10.const_83)
 
         # ──────────────(craftTalentPoints)──────────────
-        craft_talent_points = char.get("craftTalentPoints", [0, 0, 0, 0, 0])  # List of 5 values, each 0-15
+        craft_talent_points = char.get("craftTalentPoints", [])
+        if not isinstance(craft_talent_points, list):
+            craft_talent_points = []
+
+        # Ensure it is at least 5 elements long, padding with zeros
+        while len(craft_talent_points) < 5:
+            craft_talent_points.append(0)
+
         packed_value = 0
         for i in range(5):
             packed_value |= (craft_talent_points[i] & 0xF) << (i * 4)
@@ -641,7 +648,7 @@ def Player_Data_Packet(char: dict,
 
     # ──────────────(Guild‐panel data)──────────────
     guild = char.get("guild", None)
-    in_guild = guild is not None
+    in_guild = (guild is not None) and (len(guild) > 0)
     buf.write_method_11(1 if in_guild else 0, 1)
 
     if in_guild:

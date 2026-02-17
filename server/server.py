@@ -118,6 +118,8 @@ class ClientSession:
         #  entity tracking
         self.entities = {}  # authoritative movement cache
         self.transfer_token = None
+        self._story_player_idx_by_level = {}  # level_key -> player_abs_index
+        self._story_statue_id_cache = {}      # level_key -> {npc_id: story_key}
 
         # Some clients occasionally send first_login=0 on initial world connect.
         # Track whether we have already sent the one-time extended player data

@@ -316,10 +316,19 @@ def handle_level_transfer_request(session, data):
     has_old_coord = (old_x is not None and old_y is not None)
 
     # Remove old player entity if present
-    if session.clientEntID in session.entities:
-        del session.entities[session.clientEntID]
-        print(f"[{session.addr}] Removed entity {session.clientEntID} from level {old_level}")
-        handle_entity_destroy_server(session, session.clientEntID, all_sessions)
+    old_client_ent_id = session.clientEntID
+    if old_client_ent_id in session.entities:
+        del session.entities[old_client_ent_id]
+        print(f"[{session.addr}] Removed entity {old_client_ent_id} from level {old_level}")
+        handle_entity_destroy_server(session, old_client_ent_id, all_sessions)
+
+    # Prevent stale player-relative NPC resolving after zone changes.
+    session.clientEntID = None
+    for attr_name in ("_story_player_idx_by_level", "_story_statue_id_cache"):
+        cache = getattr(session, attr_name, None)
+        if isinstance(cache, dict):
+            cache.clear()
+
     # Prepare for upcoming level transition
     session.player_spawned = False
 
