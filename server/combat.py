@@ -42,9 +42,19 @@ def write_enttype_gear(bb, gear):
     bb.write_method_6(gear["gearID"], GearType.GEARTYPE_BITSTOSEND)
     bb.write_method_6(gear["tier"], GearType.const_176)
 
-    bb.write_method_6(gear.get("rune1", 0), class_64.const_101)
-    bb.write_method_6(gear.get("rune2", 0), class_64.const_101)
-    bb.write_method_6(gear.get("rune3", 0), class_64.const_101)
+    runes = gear.get("runes")
+    if isinstance(runes, (list, tuple)) and len(runes) >= 3:
+        rune1 = int(runes[0])
+        rune2 = int(runes[1])
+        rune3 = int(runes[2])
+    else:
+        rune1 = int(gear.get("rune1", 0))
+        rune2 = int(gear.get("rune2", 0))
+        rune3 = int(gear.get("rune3", 0))
+
+    bb.write_method_6(rune1, class_64.const_101)
+    bb.write_method_6(rune2, class_64.const_101)
+    bb.write_method_6(rune3, class_64.const_101)
 
     colors = gear.get("colors")
     if isinstance(colors, (list, tuple)) and len(colors) >= 2:
@@ -863,22 +873,42 @@ def handle_equip_rune(session,  data):
     gear = matching_gears[0]
     old_rune = gear["runes"][rune_idx]
 
+    def resolve_charm_entry_id(entry):
+        if not isinstance(entry, dict):
+            return None
+
+        c_id = entry.get("charmID")
+        if c_id is None:
+            c_id = entry.get("id")
+
+        if c_id is None and entry.get("charmName"):
+            try:
+                from constants import get_charm_id
+                c_id = get_charm_id(entry.get("charmName"))
+                if c_id:
+                    entry["charmID"] = c_id
+            except Exception:
+                c_id = None
+
+        try:
+            return int(c_id) if c_id is not None else None
+        except (TypeError, ValueError):
+            return None
+
     def add_charm(charm_id, amount=1):
         for c in charms:
-            if c["charmID"] == charm_id:
-                c["count"] += amount
+            c_id = resolve_charm_entry_id(c)
+            if c_id == charm_id:
+                c["count"] = int(c.get("count", 0)) + amount
                 return
         charms.append({"charmID": charm_id, "count": amount})
 
     def consume_charm(charm_id):
         for c in charms:
-            # Handle potential malformed entries or merged charms structure
-            if not isinstance(c, dict):
-                continue
-            c_id = c.get("charmID") or c.get("id")
+            c_id = resolve_charm_entry_id(c)
             if c_id == charm_id:
                 if "count" in c:
-                    c["count"] -= 1
+                    c["count"] = int(c.get("count", 0)) - 1
                     if c["count"] <= 0:
                         charms.remove(c)
                 else:

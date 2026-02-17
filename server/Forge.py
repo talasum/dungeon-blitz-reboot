@@ -135,6 +135,10 @@ def pick_secondary_rune(
     char: dict | None = None,
     materials_used: list[int] | None = None,
 ) -> tuple[int, int]:
+    # Charm Remover must never roll a secondary bonus/rarity.
+    if primary_id == class_1.const_459:
+        return 0, 0
+
     base_chance_any = 0.0
     base_chance_legendary = 0.0
 
@@ -280,13 +284,17 @@ def handle_start_forge(session, data):
         list(materials_used.keys())  # <-- pass material IDs to the RNG
     )
 
+    initial_usedlist = 0
+    if 1 <= int(secondary) <= 9:
+        initial_usedlist = (1 << (int(secondary) - 1))
+
     mf = char.setdefault("magicForge", {})
     mf.update({
         "primary": primary,
         "secondary": secondary,
         "ReadyTime": end_ts,
         "secondary_tier": var_8,
-        "usedlist": 0,
+        "usedlist": initial_usedlist,
         "forge_roll_a": 0,
         "forge_roll_b": 0,
         "is_extended_forge": bool(forge_flags.get("is_extended_forge", False)),
@@ -478,16 +486,18 @@ def pick_unused_property(usedlist: int, primary_charm_id: int) -> int | None:
         primary_type = charm_entry.get("PrimaryType", "")
         excluded_secondary = PRIMARY_TYPE_TO_SECONDARY.get(primary_type, 0)
 
+    available_properties = []
     for realm_id in range(1, 10):
-        # Skip the one that matches the charm's primary stat type
         if realm_id == excluded_secondary:
             continue
-
         bit = 1 << (realm_id - 1)
         if not (usedlist & bit):
-            return realm_id
+            available_properties.append(realm_id)
 
-    return None
+    if not available_properties:
+        return None
+
+    return random.choice(available_properties)
 
 def handle_magic_forge_reroll(session, data):
     br = BitReader(data[4:])
@@ -499,18 +509,25 @@ def handle_magic_forge_reroll(session, data):
 
     primary = int(mf.get("primary", 0))
     server_usedlist = int(mf.get("usedlist", 0))
+    current_secondary = int(mf.get("secondary", 0))
 
     if server_usedlist == 0:
         server_usedlist = 0
+
+    # Ensure the currently shown bonus (including the initial forge result)
+    # is always considered "used" and cannot be rolled again.
+    if 1 <= current_secondary <= 9:
+        server_usedlist |= (1 << (current_secondary - 1))
+
+    new_secondary = pick_unused_property(server_usedlist, primary)
+    if not new_secondary:
+        # No eligible properties remain; do not charge reroll cost.
+        return
 
     forge_level = get_forge_level(mf)
     cost = class_8.FORGE_REROLL_COSTS[forge_level - 1]
     char["mammothIdols"] -= cost
     send_premium_purchase(session, "Forge Reroll", cost)
-
-    new_secondary = pick_unused_property(server_usedlist, primary)
-    if not new_secondary:
-        return
 
     # Preserve the original tier (Rare/Legendary) - don't randomize it!
     original_tier = int(mf.get("secondary_tier", 1))
