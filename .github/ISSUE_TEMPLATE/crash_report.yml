@@ -1,0 +1,31 @@
+name: Crash Report
+description: Specialized report for client or server crashes.
+labels: ["crash", "impact:critical"]
+assignees:
+  ["Telahair", "Neodevils", "michii18", "ekmekler", "DarkneesGlow", "dullK-jpg"]
+body:
+  - type: textarea
+    id: crash-description
+    attributes:
+      label: Crash Summary
+      description: What was happening right before the crash?
+    validations:
+      required: true
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Traceback / Call Stack
+      description: Copy-paste the Error # message and stack trace.
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Local Development
+        - Production (Kaeru)
+        - Production (Other)
+    validations:
+      required: true
