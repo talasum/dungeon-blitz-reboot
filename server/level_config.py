@@ -1,4 +1,5 @@
 import os
+import re
 import struct
 
 import missions
@@ -22,9 +23,45 @@ LEVEL_CONFIG = {
     if (p := spec.split()) and len(p) >= 4
 }
 
+_LEVEL_NAME_CANONICAL = {str(name).lower(): name for name in LEVEL_CONFIG}
+_LEVEL_ALIASES = {
+    "blackrosemire": "SwampRoadNorth",
+    "blackrosemirehard": "SwampRoadNorthHard",
+    "wolfsend": "NewbieRoad",
+    "wolfsendhard": "NewbieRoadHard",
+    "newbieroad": "NewbieRoad",
+    "newbieroadhard": "NewbieRoadHard",
+}
+_CRITICAL_DOOR_FALLBACKS = {
+    ("NewbieRoad", 2): "SwampRoadNorth",
+    ("NewbieRoadHard", 2): "SwampRoadNorthHard",
+}
+
+
+def normalize_level_name(level_name: str | None) -> str | None:
+    if level_name is None:
+        return None
+    raw = str(level_name).strip()
+    if not raw:
+        return raw
+    if raw in LEVEL_CONFIG:
+        return raw
+
+    canonical = _LEVEL_NAME_CANONICAL.get(raw.lower())
+    if canonical:
+        return canonical
+
+    compact = re.sub(r"[^a-z0-9]+", "", raw.lower())
+    alias = _LEVEL_ALIASES.get(compact)
+    if alias:
+        return alias
+    return raw
+
 # witness the spaghetti code  down below :)
 
 def resolve_special_mission_doors(session, char, current_level, target_level):
+    current_level = normalize_level_name(current_level) or current_level
+    target_level = normalize_level_name(target_level) or target_level
     missions = char.get("missions", {})
 
     def get_state(mid):
@@ -236,16 +273,19 @@ def handle_open_door(session, data):
     br = BitReader(data[4:])
     door_id = br.read_method_9()
 
-    current_level = session.current_level
+    current_level = normalize_level_name(session.current_level) or session.current_level
     #print(f"[{session.addr}] OpenDoor request: doorID={door_id}, current_level={current_level}")
 
     # --- Resolve base mapping ---
     target_level = DOOR_MAP.get((current_level, door_id))
+    if target_level is None:
+        target_level = _CRITICAL_DOOR_FALLBACKS.get((current_level, door_id))
+    target_level = normalize_level_name(target_level) or target_level
 
     # --- Fallback: dungeon doors use entry_level if no mapping found ---
     is_dungeon = LEVEL_CONFIG.get(current_level, (None, None, None, False))[3]
     if target_level is None and is_dungeon:
-        target_level = session.entry_level
+        target_level = normalize_level_name(session.entry_level) or session.entry_level
         if not target_level:
             print(f"[{session.addr}] Error: No entry_level for door {door_id} in dungeon {current_level}")
             return
@@ -253,6 +293,15 @@ def handle_open_door(session, data):
     # --- Special case: 999 always returns to CraftTown ---
     if door_id == 999:
         target_level = "CraftTown"
+
+    # Never send an empty/None target to client; this can cause transfer fallback to current zone.
+    if not target_level:
+        print(f"[{session.addr}] Warning: unresolved door target for level={current_level}, door={door_id}; staying in current level")
+        target_level = current_level or "NewbieRoad"
+
+    # Keep the most recent door target so 0x1D can recover from blank/alias level names.
+    session._last_door_id = int(door_id)
+    session._last_door_target_level = str(target_level)
 
     bb = BitBuffer()
     bb.write_method_4(door_id)
@@ -274,7 +323,8 @@ def handle_level_transfer_request(session, data):
 
     br = BitReader(data[4:])
     player_token = br.read_method_9()
-    requested_level_name = br.read_method_13()
+    requested_level_name_raw = br.read_method_13()
+    requested_level_name = normalize_level_name(requested_level_name_raw) or requested_level_name_raw
 
     # Resolve character + default target level from token tables
     entry = GS.used_tokens.get(player_token) or GS.pending_world.get(player_token)
@@ -291,16 +341,32 @@ def handle_level_transfer_request(session, data):
         return
 
     char, default_target_level = entry[:2]
+    default_target_level = normalize_level_name(default_target_level) or default_target_level
+    last_door_target = normalize_level_name(getattr(session, "_last_door_target_level", None))
 
     # Sanitize requested level: treat empty or "None" as missing
     if not requested_level_name or requested_level_name == "None":
-        target_level = default_target_level
-        print(
-            f"[{session.addr}] ERROR: Empty/None level_name in 0x1D, "
-            f"using target_level={target_level}"
-        )
+        if last_door_target and last_door_target in LEVEL_CONFIG:
+            target_level = last_door_target
+            print(
+                f"[{session.addr}] 0x1D requested empty level_name, "
+                f"using last door target={target_level}"
+            )
+        else:
+            target_level = default_target_level
+            print(
+                f"[{session.addr}] 0x1D requested empty level_name, "
+                f"using token target={target_level}"
+            )
     else:
         target_level = requested_level_name
+
+    if target_level not in LEVEL_CONFIG and last_door_target and last_door_target in LEVEL_CONFIG:
+        print(
+            f"[{session.addr}] 0x1D unknown requested level '{target_level}', "
+            f"falling back to last door target={last_door_target}"
+        )
+        target_level = last_door_target
 
     # Determine old_level (where we are coming from logically)
     old_level_rec = char.get("CurrentLevel")
@@ -308,6 +374,7 @@ def handle_level_transfer_request(session, data):
         old_level = old_level_rec.get("name") or session.current_level or "NewbieRoad"
     else:
         old_level = old_level_rec or session.current_level or "NewbieRoad"
+    old_level = normalize_level_name(old_level) or old_level
 
     # Capture previous level coords *before* entity removal
     ent = session.entities.get(session.clientEntID, {})
@@ -351,6 +418,7 @@ def handle_level_transfer_request(session, data):
 
     # Resolve mission/special door overrides
     target_level = resolve_special_mission_doors(session, char, old_level, target_level)
+    target_level = normalize_level_name(target_level) or target_level
 
     # Compute spawn coordinates for the NEW level (but don't spawn yet)
     new_x, new_y, new_has_coord = get_spawn_coordinates(char, old_level, target_level)
