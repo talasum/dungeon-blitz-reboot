@@ -3,15 +3,16 @@ import os
 import struct
 import random
 import re
+import threading
 import time
 
 from bitreader import BitReader
-from constants import GearType, class_3, PowerType, Game, class_119, PET_TYPES, get_egg_id, Entity
+from constants import GearType, class_3, PowerType, Game, class_119, PET_TYPES, get_egg_id, Entity, Mission
 from BitBuffer import BitBuffer
 from globals import build_start_skit_packet
-from missions import get_mission_extra
+from missions import get_mission_extra, get_mission_id_by_name, get_mission_def
 from accounts import save_characters
-from globals import send_gold_reward, send_gear_reward, send_hp_update, send_material_reward, GS, send_npc_dialog, send_consumable_reward, send_charm_reward, send_mount_reward, send_dye_reward, send_new_pet_packet, get_npc_props
+from globals import send_gold_reward, send_gear_reward, send_hp_update, send_entity_heal, send_material_reward, GS, send_npc_dialog, send_consumable_reward, send_charm_reward, send_mount_reward, send_dye_reward, send_new_pet_packet, get_npc_props
 from game_data import get_random_gear_id
 from data.npc_chats import NPC_CHATS
 
@@ -292,6 +293,145 @@ QUEST_MISSION_NAMED_DIALOG_TEMPLATES = [
     "{name} says returning to the quest giver is mandatory.",
 ]
 
+
+# ── Mission runtime helpers (Newbie Road chain) ──
+
+EARLY_STORY_MISSION_IDS = set(range(1, 9))  # DefendTheShip .. DeliverToSwamp
+
+
+def _get_char_missions(char: dict) -> dict:
+    missions = char.get("missions")
+    if not isinstance(missions, dict):
+        missions = {}
+        char["missions"] = missions
+    return missions
+
+
+def _get_mission_state(char: dict, mission_id: int) -> int:
+    missions = _get_char_missions(char)
+    m = missions.get(str(mission_id)) or {}
+    try:
+        return int(m.get("state", Mission.const_213))
+    except Exception:
+        return Mission.const_213
+
+
+def _set_mission_state(
+    char: dict,
+    mission_id: int,
+    state: int,
+    curr_count: int | None = None,
+    tier: int | None = None,
+    highscore: int | None = None,
+    time_value: int | None = None,
+) -> None:
+    missions = _get_char_missions(char)
+    m = missions.setdefault(str(mission_id), {})
+    m["state"] = int(state)
+    if curr_count is not None:
+        m["currCount"] = int(curr_count)
+    if tier is not None:
+        m["Tier"] = int(tier)
+    if highscore is not None:
+        m["highscore"] = int(highscore)
+    if time_value is not None:
+        m["Time"] = int(time_value)
+
+
+def _is_mission_completed(char: dict, mission_id: int) -> bool:
+    return _get_mission_state(char, mission_id) == Mission.const_72
+
+
+def _get_mission_prereq_ids(mission_id: int) -> list[int]:
+    """
+    Return prerequisite mission IDs for the given mission, based on
+    MissionTypes.json's PreReqMissions field (comma/space separated names or IDs).
+    """
+    extra = get_mission_extra(mission_id) or {}
+    raw = extra.get("PreReqMissions")
+    if not raw:
+        return []
+
+    parts = str(raw).replace(";", ",").split(",")
+    ids: list[int] = []
+    for part in parts:
+        token = part.strip()
+        if not token:
+            continue
+        # Allow both numeric IDs and MissionName strings.
+        try:
+            mid = int(token)
+            if mid > 0:
+                ids.append(mid)
+            continue
+        except Exception:
+            pass
+
+        # Fallback: resolve by MissionName via a small one-shot scan of MissionTypes.json.
+        # To avoid tight coupling with missions internals, look up by MissionName ad‑hoc.
+        # This is only used for a tiny number of early-story missions.
+        try:
+            mission_file = os.path.join(os.path.dirname(__file__), "data", "MissionTypes.json")
+            with open(mission_file, "r", encoding="utf-8") as f:
+                rows = json.load(f)
+        except Exception:
+            continue
+
+        token_lower = token.strip().lower()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("MissionName", "")).strip().lower() == token_lower:
+                try:
+                    mid = int(row.get("MissionID", 0))
+                except Exception:
+                    mid = 0
+                if mid > 0:
+                    ids.append(mid)
+                break
+
+    # Deduplicate while preserving order
+    seen = set()
+    result = []
+    for mid in ids:
+        if mid not in seen:
+            seen.add(mid)
+            result.append(mid)
+    return result
+
+
+def _can_start_mission(char: dict, mission_id: int) -> bool:
+    """
+    Check whether all prerequisite missions (if any) are completed.
+    Currently scoped to the early Newbie Road story chain (IDs 1–8).
+    """
+    if mission_id not in EARLY_STORY_MISSION_IDS:
+        return True
+    prereqs = _get_mission_prereq_ids(mission_id)
+    if not prereqs:
+        return True
+    for mid in prereqs:
+        if not _is_mission_completed(char, mid):
+            return False
+    return True
+
+
+def _persist_char_missions(session, char: dict) -> None:
+    """
+    Persist mission changes for the active character back into the
+    session.char_list and save to disk.
+    """
+    active_name = char.get("name")
+    if not active_name:
+        return
+    for c in session.char_list:
+        if c.get("name") == active_name:
+            c.update(char)
+            break
+    session.current_char_dict = char
+    if getattr(session, "user_id", None) is not None:
+        save_characters(session.user_id, session.char_list)
+
 def _build_mission_npc_keys():
     mission_file = os.path.join(os.path.dirname(__file__), "data", "MissionTypes.json")
     if not os.path.isfile(mission_file):
@@ -445,6 +585,204 @@ def _canonical_story_npc_key(value):
 
 def _norm_identity_name(value):
     return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+def _mark_max_hp_sync(session):
+    session.max_hp_sync_level = getattr(session, "current_level", None)
+    session.max_hp_sync_ts = time.time()
+
+def _has_max_hp_sync_for_current_level(session):
+    current_level = getattr(session, "current_level", None)
+    synced_level = getattr(session, "max_hp_sync_level", None)
+    return bool(current_level and synced_level == current_level)
+
+def _request_client_combat_stats_sync(session):
+    if not session or not getattr(session, "conn", None):
+        return
+    bb = BitBuffer()
+    bb.write_method_6(0, Game.const_794)
+    bb.write_method_4(0)
+    payload = bb.to_bytes()
+    packet = struct.pack(">HH", 0xFB, len(payload)) + payload
+    try:
+        session.conn.sendall(packet)
+    except OSError:
+        return
+
+def _request_client_hp_report(session, reason=0):
+    if not session or not getattr(session, "conn", None):
+        return
+    bb = BitBuffer()
+    bb.write_method_6(int(reason), Game.const_390)
+    payload = bb.to_bytes()
+    packet = struct.pack(">HH", 0xF9, len(payload)) + payload
+    try:
+        session.conn.sendall(packet)
+    except OSError:
+        return
+
+def _resolve_active_player_entity_id(session):
+    entities = getattr(session, "entities", None)
+    current_name_norm = _norm_identity_name(getattr(session, "current_character", None))
+    client_ent_id = getattr(session, "clientEntID", None)
+
+    if isinstance(client_ent_id, int) and client_ent_id > 0 and isinstance(entities, dict):
+        ent = entities.get(client_ent_id)
+        if isinstance(ent, dict):
+            ent_name_norm = _norm_identity_name(ent.get("ent_name") or ent.get("name"))
+            if not current_name_norm or ent_name_norm == current_name_norm:
+                return client_ent_id
+
+    if isinstance(entities, dict):
+        for eid, ent in entities.items():
+            if not isinstance(eid, int) or not isinstance(ent, dict):
+                continue
+            if not ent.get("is_player"):
+                continue
+            ent_name_norm = _norm_identity_name(ent.get("ent_name") or ent.get("name"))
+            if current_name_norm and ent_name_norm != current_name_norm:
+                continue
+            session.clientEntID = eid
+            return eid
+
+    return client_ent_id if isinstance(client_ent_id, int) and client_ent_id > 0 else None
+
+def _resolve_authoritative_hp_state(session):
+    ent = None
+    client_ent_id = _resolve_active_player_entity_id(session)
+    if client_ent_id is not None:
+        ent = session.entities.get(client_ent_id)
+        if not isinstance(ent, dict):
+            ent = None
+
+    max_hp = getattr(session, "authoritative_max_hp", None)
+    if max_hp is None and ent is not None:
+        max_hp = ent.get("max_hp", None)
+    max_hp = int(max_hp) if max_hp is not None else 100
+    if max_hp <= 0:
+        max_hp = 100
+
+    current_hp = getattr(session, "authoritative_current_hp", None)
+    if current_hp is None:
+        if ent is not None and "hp" in ent:
+            current_hp = int(ent.get("hp", max_hp))
+        else:
+            current_hp = max_hp
+    current_hp = min(max(0, int(current_hp)), max_hp)
+    return max_hp, current_hp, ent
+
+def _send_player_hp_update(session, delta):
+    try:
+        amount = int(delta)
+    except Exception:
+        return False
+    if amount == 0:
+        return False
+
+    entity_id = _resolve_active_player_entity_id(session)
+    if entity_id is None:
+        print(f"[HP Sync] Failed to resolve active player entity for HP update delta={amount}.")
+        return False
+
+    if amount > 0:
+        # 0x3B drives the same HP update path but shows local green heal floater text.
+        send_entity_heal(session, entity_id, amount)
+    else:
+        send_hp_update(session, entity_id, amount)
+    session.last_server_hp_adjust_ts = time.time()
+    session.last_server_hp_adjust_delta = amount
+    return True
+
+def _get_recent_client_hp(session, max_age_sec=2.5):
+    try:
+        reported_hp = int(getattr(session, "last_client_hp_report_value", -1))
+    except Exception:
+        return None
+    if reported_hp < 0:
+        return None
+
+    ts = getattr(session, "last_client_hp_report_ts", None)
+    try:
+        report_ts = float(ts)
+        age = time.time() - report_ts
+    except Exception:
+        return None
+    if age < 0 or age > float(max_age_sec):
+        return None
+
+    # Ignore client reports older than the last server-side HP delta packet;
+    # using them can double-apply orb heals.
+    try:
+        last_adjust_ts = float(getattr(session, "last_server_hp_adjust_ts", 0.0) or 0.0)
+    except Exception:
+        last_adjust_ts = 0.0
+    if report_ts <= (last_adjust_ts + 0.005):
+        return None
+
+    return reported_hp
+
+def _schedule_pending_orb_hp_report_retries(session, pending_token):
+    def _worker():
+        # Client can throttle consecutive 0xF9-triggered reports for a short window.
+        # Retry a few times while this pending orb is still active.
+        for delay in (0.35, 0.90, 1.80):
+            time.sleep(delay)
+            if not getattr(session, "running", False):
+                return
+            pending = getattr(session, "pending_orb_heal", None)
+            if not isinstance(pending, dict) or pending.get("token") != pending_token:
+                return
+            expires_at = float(pending.get("expires_at", 0.0) or 0.0)
+            if time.time() > expires_at:
+                return
+            _request_client_hp_report(session, reason=1)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+def _queue_pending_orb_heal(session, amount, *, wait_for_max_sync=False, picked_at_full=False):
+    now = time.time()
+    current_level = getattr(session, "current_level", None)
+    existing = getattr(session, "pending_orb_heal", None)
+    created_new = False
+
+    if (
+        isinstance(existing, dict)
+        and existing.get("level") == current_level
+        and now <= float(existing.get("expires_at", 0.0) or 0.0)
+    ):
+        entries = existing.setdefault("entries", [])
+        entries.append({
+            "amount": int(amount),
+            "queued_at": now,
+            "picked_at_full": bool(picked_at_full),
+        })
+        existing["amount"] = int(existing.get("amount", 0) or 0) + int(amount)
+        existing["picked_at_full"] = bool(existing.get("picked_at_full", False) or picked_at_full)
+        existing["wait_for_max_sync"] = bool(existing.get("wait_for_max_sync", False) or wait_for_max_sync)
+        existing["expires_at"] = now + 6.0
+        pending_token = int(existing.get("token", 0) or 0)
+    else:
+        created_new = True
+        pending_token = int(time.time_ns() & 0x7FFFFFFF)
+        session.pending_orb_heal = {
+            "token": pending_token,
+            "entries": [{
+                "amount": int(amount),
+                "queued_at": now,
+                "picked_at_full": bool(picked_at_full),
+            }],
+            "amount": int(amount),
+            "queued_at": now,
+            "expires_at": now + 6.0,
+            "wait_for_max_sync": bool(wait_for_max_sync),
+            "picked_at_full": bool(picked_at_full),
+            "level": current_level,
+        }
+
+    if wait_for_max_sync:
+        _request_client_combat_stats_sync(session)
+    _request_client_hp_report(session)
+    if created_new:
+        _schedule_pending_orb_hp_report_retries(session, pending_token)
 
 def _level_cache_key(level_name):
     return (level_name or "").strip().lower()
@@ -893,6 +1231,14 @@ def _get_level_index_map(level_name):
         return None
 
     exact = LEVEL_INTERACTABLE_INDEX_MAPS.get(normalized)
+
+    # HARDCODED OVERRIDES FOR CLIENT SWF ENTITY INDICES
+    # The client SWF has Captain Fink at index 29 in NewbieRoad (ID 1919371)
+    if normalized == "newbieroad":
+        if exact is None:
+            exact = {}
+        exact[29] = "captainfink"
+
     if exact:
         return exact
 
@@ -1056,7 +1402,41 @@ def handle_set_level_complete(session, data):
         # Fallback to client-reported values
         actual_kills = pkt_required_kills - pkt_remaining_kills
 
-    # Send dungeon completion with actual values from client
+    # Check for any active mission that relies on this dungeon to complete
+    char = session.current_char_dict or {}
+    player_missions = char.get("missions", {})
+    from globals import send_mission_complete
+    
+    completed_mission_id = None
+    for mid_str, mdata in player_missions.items():
+        if mdata.get("state") == Mission.const_58:  # In progress
+            try:
+                mid = int(mid_str)
+            except:
+                continue
+            
+            # Use get_mission_def to check if this mission's Dungeon matches
+            from missions import get_mission_def
+            mdef = get_mission_def(mid)
+            if mdef.get("Dungeon") == session.current_level:
+                # Complete the dungeon mission
+                _set_mission_state(char, mid, Mission.const_72)
+                _persist_char_missions(session, char)
+                completed_mission_id = mid
+                send_mission_complete(session, mid)
+                break
+
+    if completed_mission_id is not None:
+        # Send 0x84 (Mission Complete UI) for the dungeon mission
+        bb = BitBuffer()
+        bb.write_method_4(completed_mission_id)
+        bb.write_method_11(True) # true if this is a dungeon
+        bb.write_method_6(pkt_level_width_score or 3, 4) # Stars
+        bb.write_method_4(pkt_bonus_score_total) # Dungeon score
+        payload = bb.to_bytes()
+        session.conn.sendall(struct.pack(">HH", 0x84, len(payload)) + payload)
+    
+    # Always send dungeon completion with actual values from client
     send_dummy_level_complete(
         session,
         kills=actual_kills,
@@ -1110,6 +1490,7 @@ def handle_send_combat_stats(session, data):
     # Sync with player entity
     ent = session.entities.get(session.clientEntID)
     session.authoritative_max_hp = max_hp # Store on session for persistence across level loads
+    _mark_max_hp_sync(session)
 
     print(f"[HP Sync] Stats from client: melee={melee_damage}, magic={magic_damage}, max_hp={max_hp}, rev={stat_rev}")
     
@@ -1132,6 +1513,10 @@ def handle_send_combat_stats(session, data):
             session.authoritative_current_hp = max_hp
         else:
             session.authoritative_current_hp = min(max(0, int(prev_hp)), max_hp)
+
+    pending_orb_heal = getattr(session, "pending_orb_heal", None)
+    if pending_orb_heal:
+        _request_client_hp_report(session, reason=2)
 
 
 #TODO...
@@ -1159,24 +1544,7 @@ def handle_pickup_lootdrop(session, data):
 
         if "health" in loot:
             hp_gain = int(loot["health"])
-            # Update entity HP
-            ent = session.entities.get(session.clientEntID)
-            
-            # Determine max HP: prefer session-based authoritative, fallback to entity data or 100
-            max_hp = getattr(session, "authoritative_max_hp", None)
-            if max_hp is None and ent:
-                max_hp = ent.get("max_hp", None)
-            max_hp = int(max_hp) if max_hp is not None else 100
-            if max_hp <= 0:
-                max_hp = 100
-
-            current_hp = getattr(session, "authoritative_current_hp", None)
-            if current_hp is None:
-                if ent and "hp" in ent:
-                    current_hp = int(ent.get("hp", max_hp))
-                else:
-                    current_hp = max_hp
-            current_hp = min(max(0, int(current_hp)), max_hp)
+            max_hp, current_hp, ent = _resolve_authoritative_hp_state(session)
             session.authoritative_current_hp = current_hp
             
             if ent:
@@ -1185,21 +1553,50 @@ def handle_pickup_lootdrop(session, data):
                 
             # Check if already at max HP
             actual_gain = 0
-            if current_hp >= max_hp:
-                print(f"[Loot] {char['name']} picked up health globe but HP is full (HP: {current_hp}/{max_hp}).")
+            hp_sync_ready = _has_max_hp_sync_for_current_level(session)
+            if not hp_sync_ready:
+                picked_at_full = current_hp >= max_hp
+                _queue_pending_orb_heal(
+                    session,
+                    hp_gain,
+                    wait_for_max_sync=True,
+                    picked_at_full=picked_at_full,
+                )
+                print(
+                    f"[Loot] {char['name']} deferred orb heal +{hp_gain}; "
+                    f"waiting for max HP sync in {session.current_level}."
+                )
+            elif current_hp >= max_hp:
+                recent_client_hp = _get_recent_client_hp(session, max_age_sec=2.5)
+                if recent_client_hp is not None and recent_client_hp < max_hp:
+                    reconciled_hp = min(max_hp, max(0, int(recent_client_hp)))
+                    apply_gain = min(max_hp - reconciled_hp, hp_gain)
+                    if apply_gain > 0:
+                        new_hp = reconciled_hp + apply_gain
+                        session.authoritative_current_hp = new_hp
+                        if ent:
+                            ent["hp"] = new_hp
+                        _send_player_hp_update(session, apply_gain)
+                        actual_gain = apply_gain
+                        print(
+                            f"[HP DriftFix] Used recent client HP report ({reconciled_hp}/{max_hp}) "
+                            f"for immediate orb heal +{apply_gain}."
+                        )
+                    else:
+                        print(
+                            f"[Loot] {char['name']} orb ignored after report reconcile "
+                            f"(report={reconciled_hp}/{max_hp})."
+                        )
+                else:
+                    print(f"[Loot] {char['name']} picked up health globe but HP is full (HP: {current_hp}/{max_hp}).")
 
-                # Client-side levels can drift by a few HP (client receives local damage first).
-                # Queue a short-lived delayed heal and request fresh HP report (0xF9 -> client sends 0xF6).
-                session.pending_orb_heal = {
-                    "amount": hp_gain,
-                    "expires_at": time.time() + 1.5,
-                }
-
-                bb_hp_req = BitBuffer()
-                bb_hp_req.write_method_6(0, Game.const_390)
-                hp_req_payload = bb_hp_req.to_bytes()
-                hp_req_packet = struct.pack(">HH", 0xF9, len(hp_req_payload)) + hp_req_payload
-                session.conn.sendall(hp_req_packet)
+                    # Fallback path only when recent report is unavailable.
+                    _queue_pending_orb_heal(
+                        session,
+                        hp_gain,
+                        wait_for_max_sync=False,
+                        picked_at_full=True,
+                    )
             else:
                 # Always clamp to max HP
                 new_hp = min(max_hp, current_hp + hp_gain)
@@ -1210,7 +1607,7 @@ def handle_pickup_lootdrop(session, data):
 
                 # Send HP update to client only for real gain
                 if actual_gain > 0:
-                    send_hp_update(session, session.clientEntID, actual_gain)
+                    _send_player_hp_update(session, actual_gain)
                 print(f"[Loot] {char['name']} healed +{actual_gain} HP (Final: {new_hp}/{max_hp}).")
             print(
                 f"[Loot] {char['name']} picked up health globe "
@@ -1279,13 +1676,56 @@ def handle_queue_potion(session, data):
     queued_potion_id = br.read_method_20(class_3.const_69)
     #print(f"queued potion ID : {queued_potion_id}")
 
-# i have no clue what purpose does this payload serves
+# Resolve badge key to mission ID
 def handle_badge_request(session, data):
     br = BitReader(data[4:])
     badge_key = br.read_method_26()
     print(f"[0x8D] Badge request: {badge_key}")
 
-#TODO...
+    from missions import get_mission_id_by_name, get_mission_def
+    mission_id = get_mission_id_by_name(badge_key)
+    if mission_id is None:
+        print(f"[Badge] Unknown badge key: {badge_key}")
+        return
+
+    char = session.current_char_dict
+    if not char:
+        return
+
+    missions = char.setdefault("missions", {})
+    mid_str = str(mission_id)
+    m_data = missions.get(mid_str, {})
+
+    # Already completed or turned in → skip
+    state = m_data.get("state", 0)
+    if state >= 2:
+        print(f"[Badge] {badge_key} (ID {mission_id}) already completed for {char.get('name', '?')}")
+        return
+
+    # Ensure mission entry exists and mark active → completed
+    m_data["state"] = 2
+    m_data["progress"] = 1
+    m_data["complete"] = 1
+    missions[mid_str] = m_data
+
+    # Send progress packet (0x83)
+    bb_prog = BitBuffer()
+    bb_prog.write_method_4(mission_id)
+    bb_prog.write_method_4(1)  # progress = 1
+    body_prog = bb_prog.to_bytes()
+    pkt_prog = struct.pack(">HH", 0x83, len(body_prog)) + body_prog
+    session.conn.sendall(pkt_prog)
+
+    # Send completion packet (0x84)
+    bb_comp = BitBuffer()
+    bb_comp.write_method_4(mission_id)
+    bb_comp.write_method_11(0, 1)  # IsDungeon = false
+    body_comp = bb_comp.to_bytes()
+    pkt_comp = struct.pack(">HH", 0x84, len(body_comp)) + body_comp
+    session.conn.sendall(pkt_comp)
+
+    save_characters(session.user_id, session.char_list)
+    print(f"[Badge] {char.get('name', '?')} achieved badge: {badge_key} (Mission {mission_id}) COMPLETED!")
 def handle_power_use(session, data):
     br = BitReader(data[4:])
     power = br.read_method_20(PowerType.const_423)
@@ -1406,17 +1846,30 @@ def handle_talk_to_npc(session, data):
     dialogue_id = 0
     mission_id = 0
 
-    # Player mission data
+    # Highest priority state discovered so far
+    # Priorities: 4 (Return Text), 3 (Active Text), 2 (Offer Text), 1 (Praise Text), 0 (None)
+    highest_priority = 0
+    
     char_data = session.current_char_dict or {}
-    player_missions = char_data.get("missions", {})
+    
+    # We must import to get the total number of missions to evaluate
+    from missions import get_total_mission_defs
+    total_missions = get_total_mission_defs()
 
-    # Check mission matches
-    for mid_str, mdata in player_missions.items():
-        try:
-            mid = int(mid_str)
-        except:
-            continue
+    # For mission matching, we need to handle aliases where the SWF entType 
+    # doesn't match the MissionTypes.json ContactName/ReturnName.
+    MISSION_NPC_ALIASES = {
+        "mayorristas": "nrmayor01",
+        "mayor": "nrmayor01",
+        "anna": "nranna03",
+        "pecky": "nrpecky",
+        "captainfink": "nrcaptfink",
+        "fink": "nrcaptfink",
+    }
+    mission_npc_norm = MISSION_NPC_ALIASES.get(npc_type_norm, npc_type_norm)
 
+    # Pass over all missions (not just accepted ones)
+    for mid in range(1, total_missions + 1):
         mextra = get_mission_extra(mid)
         if not mextra:
             continue
@@ -1426,42 +1879,65 @@ def handle_talk_to_npc(session, data):
         ret     = norm(mextra.get("ReturnName"))
 
         # Normalize them BEFORE matching (auto-map via character_name)
-        if contact and contact != npc_type_norm:
+        if contact and contact != mission_npc_norm:
             # Allow character_name to solve mismatches
             if norm(mextra.get("ContactName")) == norm(npc.get("character_name")):
-                contact = npc_type_norm
-        if ret and ret != npc_type_norm:
+                contact = mission_npc_norm
+        if ret and ret != mission_npc_norm:
             if norm(mextra.get("ReturnName")) == norm(npc.get("character_name")):
-                ret = npc_type_norm
+                ret = mission_npc_norm
 
-        # Mission state
-        state = mdata.get("state", 0)  # 0=not accepted, 1=active, 2=completed
+        # Mission state (0=not accepted, 1=active, 2=completed)
+        state = _get_mission_state(char_data, mid)
 
-        # Match: Offering the mission
-        if npc_type_norm == contact:
-            if state == 0:
-                dialogue_id = 2  # OfferText
-                mission_id = 0
-                break
-            elif state == 1:
-                dialogue_id = 3  # ActiveText
-                mission_id = mid
-                break
-            elif state == 2:
-                dialogue_id = 5  # PraiseText
-                mission_id = mid
-                break
-
-        # Returning the mission
-        if npc_type_norm == ret:
-            if state == 1:
+        # Match: Returning the mission (Highest priority: 4)
+        if mission_npc_norm == ret and state == 1:
+            if highest_priority < 4:
+                highest_priority = 4
                 dialogue_id = 4  # ReturnText
                 mission_id = mid
-                break
-            elif state == 2:
+        
+        # Match: Active/In Progress (Priority: 3)
+        if mission_npc_norm == contact and state == 1:
+            if highest_priority < 3:
+                highest_priority = 3
+                dialogue_id = 3  # ActiveText
+                mission_id = mid
+
+        # Match: Offering the mission (Priority: 2)
+        if mission_npc_norm == contact and state == 0:
+            if highest_priority < 2:
+                # IMPORTANT: We must NOT set mission_id = 0 here. 
+                # We need the mission_id so the auto-accept hook below works.
+                highest_priority = 2
+                dialogue_id = 2  # OfferText
+                mission_id = mid
+
+        # Match: Completed/Praise (Priority: 1)
+        if (mission_npc_norm == contact or mission_npc_norm == ret) and state == 2:
+            if highest_priority < 1:
+                highest_priority = 1
                 dialogue_id = 5  # PraiseText
                 mission_id = mid
-                break
+
+    # Mission-side state updates for early Newbie Road story chain
+    if dialogue_id != 0 and mission_id and mission_id in EARLY_STORY_MISSION_IDS:
+        char = session.current_char_dict or {}
+        current_state = _get_mission_state(char, mission_id)
+        from globals import send_mission_added, send_mission_complete
+
+        # Accept mission on first OfferText
+        if dialogue_id == 2 and current_state == Mission.const_213:
+            if _can_start_mission(char, mission_id):
+                _set_mission_state(char, mission_id, Mission.const_58, curr_count=0)
+                _persist_char_missions(session, char)
+                send_mission_added(session, mission_id)
+
+        # Turn in mission on ReturnText
+        elif dialogue_id == 4 and current_state == Mission.const_58:
+            _set_mission_state(char, mission_id, Mission.const_72)
+            _persist_char_missions(session, char)
+            send_mission_complete(session, mission_id)
 
     # Fallback: Bubble Chat if no mission dialogue is triggered
     if dialogue_id == 0:
@@ -2137,6 +2613,7 @@ def handle_hp_increase_notice(session, data):
     current_max = int(getattr(session, "authoritative_max_hp", fallback_max) or fallback_max)
     new_max = max(1, current_max + max_hp_delta)
     session.authoritative_max_hp = new_max
+    _mark_max_hp_sync(session)
 
     ent = session.entities.get(session.clientEntID) if session.clientEntID is not None else None
     if ent is not None:
@@ -2146,6 +2623,10 @@ def handle_hp_increase_notice(session, data):
 
     current_hp = int(getattr(session, "authoritative_current_hp", new_max) or new_max)
     session.authoritative_current_hp = min(max(0, current_hp), new_max)
+
+    pending_orb_heal = getattr(session, "pending_orb_heal", None)
+    if pending_orb_heal and pending_orb_heal.get("wait_for_max_sync"):
+        _request_client_hp_report(session)
 
 
 def handle_client_hp_report(session, data):
@@ -2167,30 +2648,98 @@ def handle_client_hp_report(session, data):
     synced_hp = min(max(0, client_curr_hp), max_hp)
     session.authoritative_current_hp = synced_hp
     session.last_client_hp_report_ts = time.time()
+    session.last_client_hp_report_value = synced_hp
 
-    ent = session.entities.get(session.clientEntID) if session.clientEntID is not None else None
+    active_ent_id = _resolve_active_player_entity_id(session)
+    ent = session.entities.get(active_ent_id) if active_ent_id is not None else None
     if ent is not None:
         ent["max_hp"] = max_hp
         ent["hp"] = synced_hp
 
     pending_orb_heal = getattr(session, "pending_orb_heal", None)
     if pending_orb_heal:
+        now = time.time()
         expires_at = float(pending_orb_heal.get("expires_at", 0.0) or 0.0)
-        amount = int(pending_orb_heal.get("amount", 0) or 0)
+        wait_for_max_sync = bool(pending_orb_heal.get("wait_for_max_sync", False))
+        pending_level = pending_orb_heal.get("level")
+        entries = []
+        raw_entries = pending_orb_heal.get("entries")
+        if isinstance(raw_entries, list):
+            for entry in raw_entries:
+                if not isinstance(entry, dict):
+                    continue
+                amount = int(entry.get("amount", 0) or 0)
+                if amount <= 0:
+                    continue
+                queued_at = float(entry.get("queued_at", now) or now)
+                picked_at_full = bool(entry.get("picked_at_full", False))
+                entries.append({
+                    "amount": amount,
+                    "queued_at": queued_at,
+                    "picked_at_full": picked_at_full,
+                })
+        if not entries:
+            amount = int(pending_orb_heal.get("amount", 0) or 0)
+            if amount > 0:
+                entries = [{
+                    "amount": amount,
+                    "queued_at": float(pending_orb_heal.get("queued_at", now) or now),
+                    "picked_at_full": bool(pending_orb_heal.get("picked_at_full", False)),
+                }]
+
+        if pending_level and pending_level != getattr(session, "current_level", None):
+            session.pending_orb_heal = None
+            return
+
+        if now > expires_at:
+            session.pending_orb_heal = None
+            return
+
+        if wait_for_max_sync and not _has_max_hp_sync_for_current_level(session):
+            _request_client_combat_stats_sync(session)
+            return
+
         session.pending_orb_heal = None
 
-        if amount > 0 and time.time() <= expires_at and synced_hp < max_hp:
-            apply_gain = min(max_hp - synced_hp, amount)
-            if apply_gain > 0:
-                new_hp = synced_hp + apply_gain
-                session.authoritative_current_hp = new_hp
+        any_full_pick = any(bool(e.get("picked_at_full")) for e in entries)
+        current_hp = int(synced_hp)
+        applied_total = 0
+        applied_count = 0
+        if entries and current_hp < max_hp:
+            for entry in entries:
+                if current_hp >= max_hp:
+                    break
+                amount = int(entry.get("amount", 0) or 0)
+                if amount <= 0:
+                    continue
+                if entry.get("picked_at_full"):
+                    report_delay = max(0.0, now - float(entry.get("queued_at", now) or now))
+                    print(
+                        f"[HP DriftFix] Reconcile full-pick orb: "
+                        f"client report below max after {report_delay:.3f}s "
+                        f"({current_hp}/{max_hp})."
+                    )
+                apply_gain = min(max_hp - current_hp, amount)
+                if apply_gain <= 0:
+                    continue
+                current_hp += apply_gain
+                applied_total += apply_gain
+                applied_count += 1
+                _send_player_hp_update(session, apply_gain)
+
+            if applied_total > 0:
+                session.authoritative_current_hp = current_hp
                 if ent is not None:
-                    ent["hp"] = new_hp
-                send_hp_update(session, session.clientEntID, apply_gain)
+                    ent["hp"] = current_hp
                 print(
-                    f"[HP DriftFix] Applied delayed orb heal +{apply_gain} "
-                    f"after client HP report ({new_hp}/{max_hp})."
+                    f"[HP DriftFix] Applied delayed orb heal +{applied_total} "
+                    f"after client HP report ({current_hp}/{max_hp}, orbs={applied_count})."
                 )
+        elif any_full_pick:
+            print(
+                f"[HP DriftFix] Skipped delayed orb heal: picked at full HP "
+                f"(report={synced_hp}/{max_hp})."
+            )
 
 
 #TODO...
@@ -2435,7 +2984,10 @@ def handle_grant_reward(session, data):
         
         # Logic for HP orb (20% chance)
         if random.random() < 0.20:
-             hp_gain = int(getattr(session, "authoritative_max_hp", 100) * 0.15)
+             hp_base, current_hp_base, _ = _resolve_authoritative_hp_state(session)
+             if not _has_max_hp_sync_for_current_level(session):
+                 hp_base = max(100, min(hp_base, current_hp_base))
+             hp_gain = int(hp_base * 0.15)
              
         print(f"[Loot Override] {receiver_id} killed {ent_name_lookup or 'Unknown'} (dungeon_lvl={dungeon_level}). Loot: XP={exp}, Gold={gold}, Item={drop_gear}, Material={material_id}")
         

@@ -416,6 +416,31 @@ def handle_power_hit(session, data):
                         send_quest_progress(s, progress["percent"])
                         if s.current_char_dict:
                             s.current_char_dict["questTrackerState"] = progress["percent"]
+                            
+                            # Auto-complete dungeon missions when 100% cleared
+                            if progress["percent"] >= 100:
+                                from Commands import _set_mission_state, _persist_char_missions
+                                from globals import send_mission_complete
+                                from constants import Mission
+                                from missions import get_mission_def
+                                
+                                char = s.current_char_dict
+                                for mid_str, mdata in char.get("missions", {}).items():
+                                    if mdata.get("state") == Mission.const_58:
+                                        try:
+                                            mid = int(mid_str)
+                                            mdef = get_mission_def(mid)
+                                            if mdef.get("Dungeon") == level:
+                                                _set_mission_state(char, mid, Mission.const_72)
+                                                _persist_char_missions(s, char)
+                                                send_mission_complete(s, mid)
+                                                print(f"[Combat] Dungeon {level} 100% cleared! Auto-completed Mission {mid} for {char.get('name')}")
+                                                
+                                                # Optional: Do we send 0x84 here? The boss kill might trigger a UI element?
+                                                # The level exit pad will also trigger handle_set_level_complete which sends 0x84. 
+                                        except Exception as e:
+                                            print(f"[Combat] Error auto-completing dungeon mission: {e}")
+                                            continue
             
             npc_level = target.get("level", 1)
             
@@ -488,7 +513,13 @@ def handle_power_hit(session, data):
                 save_characters(session.user_id, session.char_list)
             
             # Calculate HP gain for globe
-            player_max_hp = getattr(session, "authoritative_max_hp", 100)
+            player_max_hp = int(getattr(session, "authoritative_max_hp", 100) or 100)
+            if player_max_hp <= 0:
+                player_max_hp = 100
+            if getattr(session, "max_hp_sync_level", None) != getattr(session, "current_level", None):
+                current_hp_guess = int(getattr(session, "authoritative_current_hp", player_max_hp) or player_max_hp)
+                if current_hp_guess > 0:
+                    player_max_hp = max(100, min(player_max_hp, current_hp_guess))
             ent_type_for_rank = get_ent_type(ent_name)
             rank = ent_type_for_rank.get("EntRank", "Minion") if ent_type_for_rank else "Minion"
             

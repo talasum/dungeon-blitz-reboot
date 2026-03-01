@@ -18,9 +18,9 @@ CLASS_BUILD_ORDER = {
 
 BUILDING_TO_MASTERCLASS = {v: k for k, v in MASTERCLASS_TO_BUILDING.items()}
 CLASS_DEFAULT_MASTERCLASS = {
-    "rogue": 1,
-    "paladin": 4,
-    "mage": 7,
+    "rogue": 0,
+    "paladin": 0,
+    "mage": 0,
 }
 CLASS_TOWER_BUILDINGS = {
     "rogue": [9, 10, 11],

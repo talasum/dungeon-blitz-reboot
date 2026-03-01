@@ -68,6 +68,21 @@ def send_quest_progress(session, percent):
     pkt = struct.pack(">HH", 0xB7, len(payload)) + payload
     session.conn.sendall(pkt)
 
+def send_mission_added(session, mission_id):
+    """Send Mission Added packet (0x85) to client."""
+    bb = BitBuffer()
+    bb.write_method_4(int(mission_id))
+    bb.write_method_11(0, 1)  # Usually highscore/tier flag, 0 is safe default
+    payload = bb.to_bytes()
+    session.conn.sendall(struct.pack(">HH", 0x85, len(payload)) + payload)
+
+def send_mission_complete(session, mission_id):
+    """Send Mission Complete packet (0x86) to client."""
+    bb = BitBuffer()
+    bb.write_method_4(int(mission_id))
+    payload = bb.to_bytes()
+    session.conn.sendall(struct.pack(">HH", 0x86, len(payload)) + payload)
+
 def record_dungeon_kill(level, entity_id, user_id=None):
     """Record an NPC kill in the dungeon run tracker.
     Returns {"percent": int, "kills": int, "total": int} or None if not a tracked dungeon.
@@ -513,6 +528,17 @@ def send_hp_update(session, entity_id, delta):
     pkt = struct.pack(">HH", 0x3A, len(payload)) + payload
     session.conn.sendall(pkt)
 
+def send_entity_heal(session, entity_id, amount):
+    heal_amount = int(amount)
+    if heal_amount <= 0:
+        return
+    bb = BitBuffer()
+    bb.write_method_4(entity_id)
+    bb.write_method_4(heal_amount)
+    payload = bb.to_bytes()
+    pkt = struct.pack(">HH", 0x3B, len(payload)) + payload
+    session.conn.sendall(pkt)
+
 
 def send_xp_reward(session, xp_amount: int):
     bb = BitBuffer()
@@ -688,4 +714,3 @@ def send_room_boss_info(session, boss_id, boss_name):
              other.conn.sendall(pkt)
     
     print(f"[BOSS UI] Sent 0xAC for {boss_name} ({boss_id}) in {level}")
-

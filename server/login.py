@@ -382,6 +382,8 @@ def handle_gameserver_login(session, data):
     session.current_character = char["name"]
     session.current_char_dict = char
     session.current_level     = target_level
+    session.max_hp_sync_level = None
+    session.pending_orb_heal = None
 
     _purge_same_character_ghosts(session, session.user_id, session.current_character)
 

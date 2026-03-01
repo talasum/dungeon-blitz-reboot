@@ -5,6 +5,7 @@ from typing import Optional, Dict
 """
 _MISSION_DEFS_BY_ID: Optional[Dict[int, dict]] = None
 _MISSION_EXTRA_BY_ID: Optional[Dict[int, dict]] = None
+_MISSION_NAME_TO_ID: Optional[Dict[str, int]] = None
 _MISSION_MAX_ID: int = 0
 
 def _is_truthy(v) -> bool:
@@ -22,7 +23,7 @@ def _parse_int(v, default=0) -> int:
         return default
 
 def load_mission_defs(path: str = "data/MissionTypes.json") -> None:
-    global _MISSION_DEFS_BY_ID, _MISSION_MAX_ID, _MISSION_EXTRA_BY_ID
+    global _MISSION_DEFS_BY_ID, _MISSION_MAX_ID, _MISSION_EXTRA_BY_ID, _MISSION_NAME_TO_ID
     if _MISSION_DEFS_BY_ID is not None:
         return
 
@@ -31,6 +32,7 @@ def load_mission_defs(path: str = "data/MissionTypes.json") -> None:
 
     defs: Dict[int, dict] = {}
     extra: Dict[int, dict] = {}
+    name_map: Dict[str, int] = {}
     max_id = 0
 
     for row in raw:
@@ -55,19 +57,34 @@ def load_mission_defs(path: str = "data/MissionTypes.json") -> None:
         }
 
         extra[mid] = {
-            "ContactName": row.get("ContactName"),
-            "ReturnName":  row.get("ReturnName"),
-            "OfferText":   row.get("OfferText"),
-            "ActiveText":  row.get("ActiveText"),
-            "ReturnText":  row.get("ReturnText"),
-            "PraiseText":  row.get("PraiseText"),
+            "ContactName":    row.get("ContactName"),
+            "ReturnName":     row.get("ReturnName"),
+            "OfferText":      row.get("OfferText"),
+            "ActiveText":     row.get("ActiveText"),
+            "ReturnText":     row.get("ReturnText"),
+            "PraiseText":     row.get("PraiseText"),
+            # Raw prerequisite mission string (e.g. "RescueAnna,SlayTheDragon")
+            # Kept here so runtime helpers can resolve story chains without
+            # reparsing MissionTypes.json.
+            "PreReqMissions": row.get("PreReqMissions"),
         }
+
+        mission_name = row.get("MissionName")
+        if mission_name:
+            name_map[mission_name] = mid
 
         if mid > max_id:
             max_id = mid
     _MISSION_DEFS_BY_ID = defs
     _MISSION_EXTRA_BY_ID = extra
+    _MISSION_NAME_TO_ID = name_map
     _MISSION_MAX_ID = max_id
+
+def get_mission_id_by_name(name: str) -> Optional[int]:
+    """Resolve a MissionName string (e.g. 'KingOfTheWorld') to its numeric ID."""
+    if _MISSION_NAME_TO_ID is None:
+        load_mission_defs()
+    return (_MISSION_NAME_TO_ID or {}).get(name)
 
 def get_mission_extra(mid: int) -> dict:
     if _MISSION_EXTRA_BY_ID is None:
