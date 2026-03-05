@@ -18,7 +18,7 @@ from level_config import LEVEL_CONFIG
 
 #===========#
 
-ENABLE_ADMIN_PANEL = True
+ENABLE_ADMIN_PANEL = False
 
 #===========#
 
