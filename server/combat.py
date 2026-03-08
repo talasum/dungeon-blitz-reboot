@@ -476,6 +476,7 @@ def handle_power_hit(session, data):
                                 from Commands import _set_mission_state, _persist_char_missions
                                 from globals import send_mission_complete
                                 from constants import Mission
+                                from mission_state import completion_state_for_objective
                                 from missions import get_mission_def
                                 
                                 char = s.current_char_dict
@@ -485,7 +486,7 @@ def handle_power_hit(session, data):
                                             mid = int(mid_str)
                                             mdef = get_mission_def(mid)
                                             if mdef.get("Dungeon") == level:
-                                                _set_mission_state(char, mid, Mission.const_72)
+                                                _set_mission_state(char, mid, completion_state_for_objective(mid))
                                                 _persist_char_missions(s, char)
                                                 send_mission_complete(s, mid)
                                                 _send_dungeon_mission_complete_ui(

@@ -13,10 +13,11 @@ from WorldEnter import build_enter_world_packet, Player_Data_Packet
 from accounts import get_or_create_user_id, load_accounts, build_popup_packet, is_character_name_taken, load_characters, save_characters
 from ai_logic import AI_ENABLED, ensure_ai_loop, run_ai_loop
 from bitreader import BitReader
-from constants import EntType, load_class_template
+from constants import EntType, Mission, load_class_template
 from entity import Send_Entity_Data, allocate_entity_id, ensure_level_npcs, normalize_entity_for_send
 from globals import SECRET, _level_add, all_sessions, GS, HOST, PORTS, send_quest_progress, reset_dungeon_run, init_dungeon_run, send_npc_dialog, send_mission_added
 from level_config import LEVEL_CONFIG, get_spawn_coordinates, send_room_event_start
+from mission_state import get_mission_state, normalize_char_missions
 from socials import get_group_for_session, online_group_members, update_session_group_cache, build_group_update_packet
 
 # Keep empty in production so dungeon NPCs are server-spawned and obey
@@ -54,6 +55,30 @@ def should_client_spawn_npcs(level_name: str, is_dev_client: bool) -> bool:
 def _is_dungeon_level_for_runtime(level_name: str) -> bool:
     level_config = LEVEL_CONFIG.get(level_name, ("", 0, 0, False))
     return level_config[3] and level_name != "CraftTown"
+
+
+def _repair_stuck_tutorial_boat_mission(char: dict) -> bool:
+    current_level = str((char.get("CurrentLevel") or {}).get("name", ""))
+    if not current_level or current_level == "TutorialBoat":
+        return False
+    if get_mission_state(char, 1) != Mission.const_58:
+        return False
+    if get_mission_state(char, 2) != Mission.const_213:
+        return False
+
+    missions = char.get("missions")
+    if not isinstance(missions, dict):
+        return False
+    entry = missions.get("1")
+    if not isinstance(entry, dict):
+        return False
+
+    entry["state"] = Mission.const_72
+    entry.pop("claimed", None)
+    entry.pop("complete", None)
+    char["questTrackerState"] = 100
+    normalize_char_missions(char)
+    return True
 
 
 def _ensure_keep_tutorial_state(session) -> dict:
@@ -633,6 +658,7 @@ def handle_login_character_create(session, data):
         "shirtColor": shirt_color,
         "pantColor": pant_color,
     })
+    normalize_char_missions(new_char)
 
     session.char_list.append(new_char)
     save_characters(session.user_id, session.char_list)
@@ -684,6 +710,7 @@ def handle_character_select(session, data):
 
         session.current_character = name
         session.current_char_dict = c
+        normalize_char_missions(session.current_char_dict)
 
         current_level = c.get("CurrentLevel", {}).get("name", "CraftTown")
         prev_level = c.get("PreviousLevel", {}).get("name", "NewbieRoad")
@@ -808,6 +835,9 @@ def handle_gameserver_login(session, data):
     
     # Update session to point to the fresh character
     session.current_char_dict = char
+    normalize_char_missions(session.current_char_dict)
+    if _repair_stuck_tutorial_boat_mission(session.current_char_dict):
+        save_characters(session.user_id, session.char_list)
     GS.pending_world.pop(token, None)
 
     # Spawn point
@@ -872,6 +902,8 @@ def handle_gameserver_login(session, data):
     session._keep_boss_music_started = False
     session._keep_intro_skit_sent = False
     session._keep_room_events_started = set()
+    session._tutorial_boat_room_events_started = set()
+    session._tutorial_dungeon_room_events_started = set()
     session.current_room_id = 0
 
     # Client-spawn mode (dev client or explicit level override)
@@ -888,6 +920,12 @@ def handle_gameserver_login(session, data):
             _start_client_spawn_fallback(session, force_reload=is_dungeon)
     else:
         _spawn_server_level_npcs_for_session(session, force_reload=is_dungeon)
+
+    # Initial Room Event Start for TutorialBoat to trigger client-side scripts
+    if session.current_level == "TutorialBoat":
+        send_room_event_start(session, 0, True)
+        send_room_event_start(session, 1, True)
+        session._tutorial_boat_room_events_started.update({0, 1})
 
     # Initial Room Event Start for TutorialDungeon to trigger client-side scripts
     if session.current_level == "TutorialDungeon":
@@ -913,7 +951,7 @@ def handle_gameserver_login(session, data):
         # Players can be routed into CraftTownTutorial before accepting from mayor,
         # which blocks completion/progression logic that expects state=InProgress.
         char = session.current_char_dict or {}
-        m5_state = int((char.get("missions", {}).get("5") or {}).get("state", Mission.const_213))
+        m5_state = get_mission_state(char, 5)
         if m5_state == Mission.const_213 and _can_start_mission(char, 5):
             _set_mission_state(char, 5, Mission.const_58, curr_count=0)
             _persist_char_missions(session, char)

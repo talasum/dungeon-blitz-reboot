@@ -144,6 +144,12 @@ def load_npc_data_for_level(level_name: str) -> list:
         # This removes all server-spawned enemies, forcing the client to use its own cue spawns.
         data = [npc for npc in data if npc.get("team") != 2]
 
+        # TutorialBoat already bakes Captain Fink and Pecky into the SWF.
+        # Server-spawning them creates visible duplicates.
+        if level_name == "TutorialBoat":
+            baked_npcs = {"IntroParrot", "NPCCaptainSteering"}
+            data = [npc for npc in data if npc.get("name") not in baked_npcs]
+
         return data
     except (FileNotFoundError, json.JSONDecodeError) as e:
         print(f"Error loading NPC data for {level_name}: {e}")

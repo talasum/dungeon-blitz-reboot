@@ -8,6 +8,7 @@ from Forge import resolve_magic_forge_state
 from constants import GearType, CLASS_NAME_TO_ID, class_64, NEWS_EVENTS, SLOT_BIT_WIDTHS, class_119, class_111, class_9, class_66, MASTERCLASS_TO_BUILDING, class_21, Game, Mission, Entity, class_7, class_16, class_118, class_1, class_10
 from globals import all_sessions
 from missions import get_total_mission_defs, get_mission_def
+from mission_state import get_mission_state, normalize_char_missions
 from socials import find_online_session, find_char_data_from_server_memory, get_live_friend_info
 
 CLASS_BUILD_ORDER = {
@@ -332,7 +333,7 @@ def Player_Data_Packet(char: dict,
         buf.write_method_11(0, 1)
 
         # ──────────────(Missions)──────────────
-        missions_state: Dict[str, dict] = char.get("missions", {}) or {}
+        missions_state: Dict[str, dict] = normalize_char_missions(char)
 
         total_defs = get_total_mission_defs()
         buf.write_method_4(total_defs)
@@ -342,25 +343,24 @@ def Player_Data_Packet(char: dict,
             mstate = missions_state.get(str(mid))
             if mdef["Tier"]:
                 # Achievement/special → exactly one bit: 1 means create Mission(id, READY, 0)
-                ready = (mstate is not None) and (mstate.get("state") == Mission.const_72)
+                ready = get_mission_state(char, mid) >= Mission.CLAIMED
                 buf.write_method_11(1 if ready else 0, 1)
                 continue
             # Regular missions
-            has_entry = mstate is not None
+            state = get_mission_state(char, mid)
+            has_entry = state != Mission.const_213
             buf.write_method_11(1 if has_entry else 0, 1)  # presence bit
             if not has_entry:
                 continue
 
-            state = mstate.get("state", Mission.const_213)
-
             # Second bit: ready vs. not-ready
-            is_ready = (state == Mission.const_72)
+            is_ready = state >= Mission.const_72
             buf.write_method_11(1 if is_ready else 0, 1)
 
             if not is_ready:
                 # In-progress path: if CompleteCount > 1, send currCount
                 if mdef["highscore"] > 1:
-                    buf.write_method_4(int(mstate.get("currCount", 0)))
+                    buf.write_method_4(int((mstate or {}).get("currCount", 0)))
             else:
                 # Third bit: 1 → READY (turn-in), 0 → CLAIMED (already collected)
                 # (client uses this to choose const_72 vs const_58)
@@ -370,9 +370,9 @@ def Player_Data_Packet(char: dict,
                 # Timed/Ranked extras — only if the *client’s* def has Time set (we mirror that here)
                 if mdef["Time"]:
                     # Tier 1 to 7 is bronze tier 8 to 9 is silver tier 10 is gold tier
-                    buf.write_method_11(int(mstate.get("Tier", 0)), class_119.const_228)
-                    buf.write_method_4(int(mstate.get("highscore", 0)))
-                    buf.write_method_4(int(mstate.get("Time", 0)))
+                    buf.write_method_11(int((mstate or {}).get("Tier", 0)), class_119.const_228)
+                    buf.write_method_4(int((mstate or {}).get("highscore", 0)))
+                    buf.write_method_4(int((mstate or {}).get("Time", 0)))
 
         # ──────────────(Friends)──────────────
         friends = char.get("friends", [])

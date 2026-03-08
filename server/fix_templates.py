@@ -13,17 +13,12 @@ for tpath in TEMPLATES:
     with open(tpath, "r", encoding="utf-8") as f:
         data = json.load(f)
         
-    # Overwrite the entire missions dictionary to reset the character's quest progress
+    # Fresh characters should start on the ship with mission 1 active.
+    data["CurrentLevel"] = {"name": "TutorialBoat", "x": 0, "y": 0}
+    data["PreviousLevel"] = {"name": "NewbieRoad", "x": 1422, "y": 827}
     data["missions"] = {
         "1": {
-            "state": 2,          # Completed
-            "currCount": 1,
-            "Tier": 10,
-            "highscore": 99999999,
-            "Time": 1710000000
-        },
-        "2": {
-            "state": 1,          # In Progress! This actively assigns the mission.
+            "state": 1,
             "currCount": 0
         }
     }

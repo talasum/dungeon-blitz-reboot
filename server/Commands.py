@@ -11,8 +11,18 @@ from constants import GearType, class_3, PowerType, Game, class_119, PET_TYPES, 
 from BitBuffer import BitBuffer
 from globals import build_start_skit_packet
 from missions import get_mission_extra, get_mission_id_by_name, get_mission_def
+from mission_state import (
+    completion_state_for_objective,
+    ensure_char_missions,
+    get_mission_state as get_normalized_mission_state,
+    mission_has_started,
+    mission_is_completed,
+    mission_requires_turn_in,
+    normalize_char_missions,
+    set_mission_state as set_normalized_mission_state,
+)
 from accounts import save_characters
-from globals import send_gold_reward, send_gear_reward, send_hp_update, send_entity_heal, send_material_reward, GS, send_npc_dialog, send_consumable_reward, send_charm_reward, send_mount_reward, send_dye_reward, send_new_pet_packet, get_npc_props
+from globals import send_gold_reward, send_gear_reward, send_hp_update, send_entity_heal, send_material_reward, GS, send_npc_dialog, send_consumable_reward, send_charm_reward, send_mount_reward, send_dye_reward, send_new_pet_packet, get_npc_props, send_quest_progress
 from game_data import get_random_gear_id
 from data.npc_chats import NPC_CHATS
 
@@ -301,20 +311,11 @@ EARLY_STORY_MISSION_IDS = set(range(1, 9)) | {271}
 
 
 def _get_char_missions(char: dict) -> dict:
-    missions = char.get("missions")
-    if not isinstance(missions, dict):
-        missions = {}
-        char["missions"] = missions
-    return missions
+    return ensure_char_missions(char)
 
 
 def _get_mission_state(char: dict, mission_id: int) -> int:
-    missions = _get_char_missions(char)
-    m = missions.get(str(mission_id)) or {}
-    try:
-        return int(m.get("state", Mission.const_213))
-    except Exception:
-        return Mission.const_213
+    return get_normalized_mission_state(char, mission_id)
 
 
 def _set_mission_state(
@@ -326,21 +327,19 @@ def _set_mission_state(
     highscore: int | None = None,
     time_value: int | None = None,
 ) -> None:
-    missions = _get_char_missions(char)
-    m = missions.setdefault(str(mission_id), {})
-    m["state"] = int(state)
-    if curr_count is not None:
-        m["currCount"] = int(curr_count)
-    if tier is not None:
-        m["Tier"] = int(tier)
-    if highscore is not None:
-        m["highscore"] = int(highscore)
-    if time_value is not None:
-        m["Time"] = int(time_value)
+    set_normalized_mission_state(
+        char,
+        mission_id,
+        state,
+        curr_count=curr_count,
+        tier=tier,
+        highscore=highscore,
+        time_value=time_value,
+    )
 
 
 def _is_mission_completed(char: dict, mission_id: int) -> bool:
-    return _get_mission_state(char, mission_id) == Mission.const_72
+    return mission_is_completed(char, mission_id)
 
 
 def _get_mission_prereq_ids(mission_id: int) -> list[int]:
@@ -422,6 +421,7 @@ def _persist_char_missions(session, char: dict) -> None:
     Persist mission changes for the active character back into the
     session.char_list and save to disk.
     """
+    normalize_char_missions(char)
     active_name = char.get("name")
     if not active_name:
         return
@@ -1415,6 +1415,16 @@ def handle_set_level_complete(session, data):
             or (int(pkt_required_kills) > 0 and int(pkt_remaining_kills) <= 0)
         )
 
+    # TutorialBoat's scripted enemy flow does not match the generic JSON kill tracker.
+    # Reaching this packet already means the Kraken fight and forced close-out finished.
+    if session.current_level == "TutorialBoat":
+        cleared_dungeon = True
+        actual_kills = max(actual_kills, actual_total, int(pkt_required_kills), 1)
+        actual_total = max(actual_total, int(pkt_required_kills), actual_kills)
+        if session.current_char_dict is not None:
+            session.current_char_dict["questTrackerState"] = 100
+        send_quest_progress(session, 100)
+
     # Check for any active mission that relies on this dungeon to complete
     char = session.current_char_dict or {}
     player_missions = char.get("missions", {})
@@ -1433,12 +1443,10 @@ def handle_set_level_complete(session, data):
                 except:
                     continue
 
-                # Use get_mission_def to check if this mission's Dungeon matches
-                from missions import get_mission_def
                 mdef = get_mission_def(mid)
                 if mdef.get("Dungeon") == session.current_level:
                     # Complete the dungeon mission
-                    _set_mission_state(char, mid, Mission.const_72)
+                    _set_mission_state(char, mid, completion_state_for_objective(mid))
                     _persist_char_missions(session, char)
                     completed_mission_id = mid
                     send_mission_complete(session, mid)
@@ -1716,13 +1724,14 @@ def handle_badge_request(session, data):
 
     # Already completed or turned in → skip
     state = m_data.get("state", 0)
-    if state >= 2:
+    if state >= Mission.CLAIMED:
         print(f"[Badge] {badge_key} (ID {mission_id}) already completed for {char.get('name', '?')}")
         return
 
     # Ensure mission entry exists and mark active → completed
-    m_data["state"] = 2
+    m_data["state"] = Mission.CLAIMED
     m_data["progress"] = 1
+    m_data["claimed"] = 1
     m_data["complete"] = 1
     missions[mid_str] = m_data
 
@@ -1743,7 +1752,43 @@ def handle_badge_request(session, data):
     session.conn.sendall(pkt_comp)
 
     save_characters(session.user_id, session.char_list)
+
+
+def _is_mission_npc_name(npc_name: str) -> bool:
+    npc_norm = _mission_npc_key(npc_name)
+    if not npc_norm:
+        return False
+
+    from missions import get_total_mission_defs
+
+    total_missions = get_total_mission_defs()
+    for mid in range(1, total_missions + 1):
+        mextra = get_mission_extra(mid)
+        if not mextra:
+            continue
+        contact = _mission_npc_key(mextra.get("ContactName"))
+        ret = _mission_npc_key(mextra.get("ReturnName"))
+        if npc_norm == contact or npc_norm == ret:
+            return True
+    return False
     print(f"[Badge] {char.get('name', '?')} achieved badge: {badge_key} (Mission {mission_id}) COMPLETED!")
+
+
+def _mission_npc_key(value: str) -> str:
+    norm_value = _norm_npc_key(value)
+    if not norm_value:
+        return ""
+    aliases = {
+        "mayorristas": "nrmayor01",
+        "mayor": "nrmayor01",
+        "anna": "nranna03",
+        "pecky": "nrpecky",
+        "captainfink": "nrcaptfink",
+        "fink": "nrcaptfink",
+    }
+    return aliases.get(norm_value, norm_value)
+
+
 def handle_power_use(session, data):
     br = BitReader(data[4:])
     power = br.read_method_20(PowerType.const_423)
@@ -1794,17 +1839,25 @@ def handle_talk_to_npc(session, data):
             if story_key:
                 _send_story_npc_dialog(session, npc_id, story_key, "INDEX-FALLBACK")
                 return
-            npc_key = _resolve_regular_npc_chat_key(mapped_name, npc_id=npc_id)
-            mapped_lines = _build_npc_dialog_pool(npc_key, mapped_name)
-            _send_regular_npc_dialog(
-                session,
-                npc_id,
-                npc_key,
-                mapped_lines,
-                "INDEX-FALLBACK",
-                raw_name=mapped_name,
-            )
-            return
+            if _is_mission_npc_name(mapped_name):
+                npc = {
+                    "id": npc_id,
+                    "name": mapped_name,
+                    "character_name": mapped_name,
+                    "entType": mapped_name,
+                }
+            else:
+                npc_key = _resolve_regular_npc_chat_key(mapped_name, npc_id=npc_id)
+                mapped_lines = _build_npc_dialog_pool(npc_key, mapped_name)
+                _send_regular_npc_dialog(
+                    session,
+                    npc_id,
+                    npc_key,
+                    mapped_lines,
+                    "INDEX-FALLBACK",
+                    raw_name=mapped_name,
+                )
+                return
 
         if _is_story_npc_level(level_name):
             # Hard guarantee: story statues in SwampRoadNorth should never fall back to generic unknown chat.
@@ -1823,17 +1876,18 @@ def handle_talk_to_npc(session, data):
                 )
             return
 
-        unknown_key = f"unknownnpc{npc_id}"
-        unknown_lines = _build_npc_dialog_pool(unknown_key, "Wanderer")
-        _send_regular_npc_dialog(
-            session,
-            npc_id,
-            unknown_key,
-            unknown_lines,
-            "UNKNOWN",
-            raw_name="Wanderer",
-        )
-        return
+        if not npc:
+            unknown_key = f"unknownnpc{npc_id}"
+            unknown_lines = _build_npc_dialog_pool(unknown_key, "Wanderer")
+            _send_regular_npc_dialog(
+                session,
+                npc_id,
+                unknown_key,
+                unknown_lines,
+                "UNKNOWN",
+                raw_name="Wanderer",
+            )
+            return
 
     # NPC internal type name:
     # This is the ONLY correct name to compare missions with.
@@ -1876,15 +1930,7 @@ def handle_talk_to_npc(session, data):
 
     # For mission matching, we need to handle aliases where the SWF entType 
     # doesn't match the MissionTypes.json ContactName/ReturnName.
-    MISSION_NPC_ALIASES = {
-        "mayorristas": "nrmayor01",
-        "mayor": "nrmayor01",
-        "anna": "nranna03",
-        "pecky": "nrpecky",
-        "captainfink": "nrcaptfink",
-        "fink": "nrcaptfink",
-    }
-    mission_npc_norm = MISSION_NPC_ALIASES.get(npc_type_norm, npc_type_norm)
+    mission_npc_norm = _mission_npc_key(npc_type_norm)
 
     # Pass over all missions (not just accepted ones)
     for mid in range(1, total_missions + 1):
@@ -1893,23 +1939,33 @@ def handle_talk_to_npc(session, data):
             continue
 
         # Mission-side names
-        contact = norm(mextra.get("ContactName"))
-        ret     = norm(mextra.get("ReturnName"))
+        contact = _mission_npc_key(mextra.get("ContactName"))
+        ret     = _mission_npc_key(mextra.get("ReturnName"))
 
         # Normalize them BEFORE matching (auto-map via character_name)
         if contact and contact != mission_npc_norm:
             # Allow character_name to solve mismatches
-            if norm(mextra.get("ContactName")) == norm(npc.get("character_name")):
+            if _mission_npc_key(mextra.get("ContactName")) == _mission_npc_key(npc.get("character_name")):
                 contact = mission_npc_norm
         if ret and ret != mission_npc_norm:
-            if norm(mextra.get("ReturnName")) == norm(npc.get("character_name")):
+            if _mission_npc_key(mextra.get("ReturnName")) == _mission_npc_key(npc.get("character_name")):
                 ret = mission_npc_norm
 
-        # Mission state (0=not accepted, 1=active, 2=completed)
+        mdef = get_mission_def(mid)
+        is_dungeon_mission = bool(mdef.get("Dungeon"))
+
+        # Internal mission state:
+        # 0 = not started
+        # 1 = active
+        # 2 = ready to turn in
+        # 3 = fully completed / praised
         state = _get_mission_state(char_data, mid)
 
         # Match: Returning the mission (Highest priority: 4)
-        if mission_npc_norm == ret and state == 1:
+        if mission_npc_norm == ret and (
+            state == Mission.const_72
+            or (state == Mission.const_58 and not is_dungeon_mission)
+        ):
             if highest_priority < 4:
                 highest_priority = 4
                 dialogue_id = 4  # ReturnText
@@ -1923,7 +1979,7 @@ def handle_talk_to_npc(session, data):
                 mission_id = mid
 
         # Match: Offering the mission (Priority: 2)
-        if mission_npc_norm == contact and state == 0:
+        if mission_npc_norm == contact and state == Mission.const_213 and _can_start_mission(char_data, mid):
             if highest_priority < 2:
                 # IMPORTANT: We must NOT set mission_id = 0 here. 
                 # We need the mission_id so the auto-accept hook below works.
@@ -1932,7 +1988,7 @@ def handle_talk_to_npc(session, data):
                 mission_id = mid
 
         # Match: Completed/Praise (Priority: 1)
-        if (mission_npc_norm == contact or mission_npc_norm == ret) and state == 2:
+        if (mission_npc_norm == contact or mission_npc_norm == ret) and state >= Mission.CLAIMED:
             if highest_priority < 1:
                 highest_priority = 1
                 dialogue_id = 5  # PraiseText
@@ -1952,8 +2008,8 @@ def handle_talk_to_npc(session, data):
                 send_mission_added(session, mission_id)
 
         # Turn in mission on ReturnText
-        elif dialogue_id == 4 and current_state == Mission.const_58:
-            _set_mission_state(char, mission_id, Mission.const_72)
+        elif dialogue_id == 4 and current_state in (Mission.const_58, Mission.const_72):
+            _set_mission_state(char, mission_id, Mission.CLAIMED)
             _persist_char_missions(session, char)
             send_mission_complete(session, mission_id)
 
@@ -3126,7 +3182,7 @@ def handle_grant_reward(session, data):
                             mid = int(mid_str)
                             mdef = get_mission_def(mid)
                             if mdef.get("Dungeon") == session.current_level:
-                                _set_mission_state(char, mid, Mission.const_72)
+                                _set_mission_state(char, mid, completion_state_for_objective(mid))
                                 _persist_char_missions(session, char)
                                 send_mission_complete(session, mid)
                                 bb_done = BitBuffer()

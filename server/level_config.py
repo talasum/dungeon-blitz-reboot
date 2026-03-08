@@ -9,6 +9,7 @@ from WorldEnter import build_enter_world_packet
 from bitreader import BitReader
 from constants import door, class_119, Entity, _load_json
 from globals import send_admin_chat, handle_entity_destroy_server, all_sessions, GS, PORTS, HOST, send_hp_update
+from mission_state import mission_has_started, mission_is_completed, mission_is_ready_to_turn_in, normalize_char_missions
 
 DATA_DIR = "data"
 
@@ -57,16 +58,85 @@ def normalize_level_name(level_name: str | None) -> str | None:
         return alias
     return raw
 
+
+def _resolve_mission_tokens(raw: str | None) -> list[int]:
+    if not raw:
+        return []
+    parts = str(raw).replace(";", ",").split(",")
+    ids: list[int] = []
+    for part in parts:
+        token = part.strip()
+        if not token:
+            continue
+        try:
+            mission_id = int(token)
+        except Exception:
+            mission_id = missions.get_mission_id_by_name(token) or 0
+        if mission_id > 0 and mission_id not in ids:
+            ids.append(mission_id)
+    return ids
+
+
+def _load_door_requirements() -> dict[tuple[str, int], dict]:
+    game_txt = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "extra-modules", "swz-scripts", "Game.swz.txt")
+    )
+    if not os.path.exists(game_txt):
+        return {}
+
+    try:
+        with open(game_txt, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except Exception:
+        return {}
+
+    def extract(block: str, tag: str) -> str:
+        match = re.search(rf"<{tag}>(.*?)</{tag}>", block, re.S)
+        return match.group(1).strip() if match else ""
+
+    requirements: dict[tuple[str, int], dict] = {}
+    for match in re.finditer(r"<DoorType>(.*?)</DoorType>", text, re.S):
+        block = match.group(1)
+        map_name = extract(block, "MapName")
+        door_id_raw = extract(block, "DoorID")
+        required_raw = extract(block, "RequiredMissions")
+        locked_message = extract(block, "LockedMessage")
+        if not map_name or not door_id_raw or not required_raw:
+            continue
+        try:
+            door_id = int(door_id_raw)
+        except Exception:
+            continue
+        mission_ids = _resolve_mission_tokens(required_raw)
+        if not mission_ids:
+            continue
+        requirements[(map_name, door_id)] = {
+            "mission_ids": mission_ids,
+            "locked_message": locked_message,
+        }
+    return requirements
+
+
+DOOR_REQUIREMENTS = _load_door_requirements()
+
+
+def _door_requirement_satisfied(char: dict, current_level: str, door_id: int) -> tuple[bool, str]:
+    requirement = DOOR_REQUIREMENTS.get((current_level, door_id))
+    if not requirement:
+        return True, ""
+
+    normalize_char_missions(char)
+    for mission_id in requirement.get("mission_ids", []):
+        if not mission_has_started(char, mission_id):
+            return False, str(requirement.get("locked_message", ""))
+    return True, ""
+
 # witness the spaghetti code  down below :)
 
 def resolve_special_mission_doors(session, char, current_level, target_level):
     current_level = normalize_level_name(current_level) or current_level
     target_level = normalize_level_name(target_level) or target_level
-    missions = char.get("missions", {})
-
-    def get_state(mid):
-        m = missions.get(str(mid))
-        return m.get("state", 0) if m else 0
+    normalize_char_missions(char)
 
     msg = "Cemetery Hill files are missing. You cannot enter this level."
 
@@ -80,31 +150,31 @@ def resolve_special_mission_doors(session, char, current_level, target_level):
 
     if target_level == "CraftTown":
         # Mission 5: "I claim this keep"
-        if get_state(5) != 2:
+        if not mission_is_completed(char, 5):
             return "CraftTownTutorial"
 
     if current_level == "SwampRoadNorth" and target_level == "SwampRoadConnectionMission":
-        if get_state(23) == 2:
+        if mission_is_completed(char, 23):
             return "SwampRoadConnection"
 
     if current_level == "BridgeTown" and target_level == "SwampRoadConnectionMission":
-        if get_state(23) == 2:
+        if mission_is_completed(char, 23):
             return "SwampRoadConnection"
 
     if current_level == "BridgeTown" and target_level == "AC_Mission1":
-        if get_state(92) == 2:
+        if mission_is_completed(char, 92):
             return "Castle"
 
     if current_level == "BridgeTownHard" and target_level == "AC_Mission1Hard":
-        if get_state(199) == 2:
+        if mission_is_completed(char, 199):
             return "CastleHard"
 
     if current_level == "ShazariDesert" and target_level == "JC_Mission1":
-        if get_state(223) == 2:
+        if mission_is_completed(char, 223):
             return "JadeCity"
 
     if current_level == "ShazariDesertHard" and target_level == "JC_Mission1Hard":
-        if get_state(199) == 2:
+        if mission_is_completed(char, 199):
             return "JadeCityHard"
 
     return target_level
@@ -274,7 +344,17 @@ def handle_open_door(session, data):
     door_id = br.read_method_9()
 
     current_level = normalize_level_name(session.current_level) or session.current_level
+    char = session.current_char_dict or {}
     #print(f"[{session.addr}] OpenDoor request: doorID={door_id}, current_level={current_level}")
+
+    requirement_ok, locked_message = _door_requirement_satisfied(char, current_level, door_id)
+    if not requirement_ok:
+        if locked_message:
+            send_admin_chat(
+                locked_message.replace("^t", "").replace("=", " ").strip(),
+                targets=session,
+            )
+        return
 
     # --- Resolve base mapping ---
     target_level = DOOR_MAP.get((current_level, door_id))
@@ -509,7 +589,8 @@ def handle_request_door_state(session, data):
     door_id = br.read_method_9()
 
     entry = DOOR_MAP.get((session.current_level, door_id))
-    char = session.current_char_dict
+    char = session.current_char_dict or {}
+    normalize_char_missions(char)
 
     #Unknown door
     if not entry:
@@ -521,15 +602,16 @@ def handle_request_door_state(session, data):
     door_target = ""
     star_rating = None
 
+    requirement_ok, _ = _door_requirement_satisfied(char, session.current_level, door_id)
+
     # Mission door: "mission:ID"
     if isinstance(entry, str) and entry.startswith("mission:"):
         mission_id = int(entry.split(":")[1])
-        m = char.get("missions", {}).get(str(mission_id), {})
-        state = m.get("state", 0)
-
-        if state == 2:  # completed
+        if mission_is_completed(char, mission_id) or mission_is_ready_to_turn_in(char, mission_id):
             door_state = door.DOORSTATE_MISSIONREPEAT
-            star_rating = m.get("Tier", 0)
+            star_rating = (char.get("missions", {}).get(str(mission_id)) or {}).get("Tier", 0)
+        elif not requirement_ok:
+            door_state = door.DOORSTATE_LOCKED
         else:
             door_state = door.DOORSTATE_MISSION
 
@@ -553,12 +635,14 @@ def handle_request_door_state(session, data):
                 for mid, m in char.get("missions", {}).items():
                     mdef = missions._MISSION_DEFS_BY_ID.get(int(mid))
                     if mdef and mdef.get("Dungeon") == target_level:
-                        if m.get("state") == 2:
+                        if mission_is_completed(char, int(mid)) or mission_is_ready_to_turn_in(char, int(mid)):
                             completed = True
                             star = m.get("Tier", 0)
                         break
 
-                if completed:
+                if not requirement_ok:
+                    door_state = door.DOORSTATE_LOCKED
+                elif completed:
                     door_state = door.DOORSTATE_MISSIONREPEAT
                     star_rating = star  # send the tier here
                 else:
@@ -568,7 +652,7 @@ def handle_request_door_state(session, data):
 
         else:
             # Normal overworld door → static
-            door_state = door.DOORSTATE_STATIC
+            door_state = door.DOORSTATE_LOCKED if not requirement_ok else door.DOORSTATE_STATIC
             door_target = target_level
 
     send_door_state(session, door_id, door_state, door_target, star_rating)

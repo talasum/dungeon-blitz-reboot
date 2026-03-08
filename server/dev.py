@@ -78,6 +78,34 @@ def handle_zone_enter(session, data):
                 pass
             started_ids.add(room_id)
 
+    if session.current_level == "TutorialBoat":
+        started_ids = getattr(session, "_tutorial_boat_room_events_started", None)
+        if started_ids is None:
+            started_ids = set()
+            session._tutorial_boat_room_events_started = started_ids
+
+        if room_id not in started_ids:
+            try:
+                from level_config import send_room_event_start
+                send_room_event_start(session, room_id, True)
+            except Exception:
+                pass
+            started_ids.add(room_id)
+
+    if session.current_level == "TutorialDungeon":
+        started_ids = getattr(session, "_tutorial_dungeon_room_events_started", None)
+        if started_ids is None:
+            started_ids = set()
+            session._tutorial_dungeon_room_events_started = started_ids
+
+        if room_id not in started_ids:
+            try:
+                from level_config import send_room_event_start
+                send_room_event_start(session, room_id, True)
+            except Exception:
+                pass
+            started_ids.add(room_id)
+
 
 def handle_level_state(session, data):
     br = BitReader(data[4:])

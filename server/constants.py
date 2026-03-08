@@ -83,8 +83,9 @@ class Bossfight:
 
 class Mission:
     const_213 = 0 # Not started
-    const_58  = 1 # In progress
-    const_72  = 2 # Completed
+    const_58  = 1 # In progress / accepted
+    const_72  = 2 # Ready to turn in
+    CLAIMED   = 3 # Fully completed / turned in
 
 class class_119:
     const_1398 = 10
