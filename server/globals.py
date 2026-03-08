@@ -57,6 +57,36 @@ def get_npc_props(level, entity_id):
             return ent.get("props", ent)
     return None
 
+
+def _is_trackable_dungeon_enemy(npc: dict) -> bool:
+    """Return True for enemies that should count toward dungeon clear progress."""
+    if not isinstance(npc, dict):
+        return False
+    if int(npc.get("team", 0)) != 2:
+        return False
+    # Many dungeon files include decorative/intro enemies in drama state (2).
+    # They are not intended to be kill-count objectives.
+    if int(npc.get("entState", 1)) == 2:
+        return False
+    if bool(npc.get("untargetable", False)):
+        return False
+    return True
+
+
+def _count_trackable_dungeon_enemies_from_json(level_name: str) -> int:
+    import json
+    import os
+
+    json_path = os.path.join("world_npcs", f"{level_name}.json")
+    if not os.path.exists(json_path):
+        return 0
+    try:
+        with open(json_path, "r") as file:
+            data = json.load(file)
+        return sum(1 for npc in data if _is_trackable_dungeon_enemy(npc))
+    except Exception:
+        return 0
+
 def send_quest_progress(session, percent):
     """Send dungeon quest progress update (0xB7) to client.
     percent: 0-100 integer representing kill progress.
@@ -83,10 +113,29 @@ def send_mission_complete(session, mission_id):
     payload = bb.to_bytes()
     session.conn.sendall(struct.pack(">HH", 0x86, len(payload)) + payload)
 
-def record_dungeon_kill(level, entity_id, user_id=None):
+def _normalize_trackable_enemy_view(npc: dict) -> dict:
+    """Normalize runtime entity keys for _is_trackable_dungeon_enemy."""
+    if not isinstance(npc, dict):
+        return {}
+    return {
+        "team": npc.get("team", 0),
+        "entState": npc.get("entState", npc.get("ent_state", 1)),
+        "untargetable": npc.get("untargetable", False),
+    }
+
+
+def record_dungeon_kill(level, entity_id, user_id=None, npc_props=None):
     """Record an NPC kill in the dungeon run tracker.
     Returns {"percent": int, "kills": int, "total": int} or None if not a tracked dungeon.
     """
+    # Guard against counting non-objective entities (players, props, scripted spawns).
+    # For client-spawn dungeons this prevents false 100% completion spikes.
+    if npc_props is None:
+        npc_props = get_npc_props(level, entity_id)
+    normalized = _normalize_trackable_enemy_view(npc_props)
+    if not normalized or not _is_trackable_dungeon_enemy(normalized):
+        return None
+
     key = (level, user_id) if user_id else level
     run = GS.dungeon_runs.get(key)
     if not run:
@@ -96,13 +145,7 @@ def record_dungeon_kill(level, entity_id, user_id=None):
         killed_ids.add(entity_id)
     total = run.get("total", 0)
     if not total:
-        # Recompute total from live entities to avoid stuck 0/partial totals
-        level_map = GS.level_entities.get(level, {})
-        total = sum(
-            1
-            for ent in level_map.values()
-            if ent.get("kind") == "npc" and ent.get("props", {}).get("team") == 2
-        )
+        total = _count_trackable_dungeon_enemies_from_json(level)
         run["total"] = total
     kills = len(killed_ids)
     run["killed"] = kills
@@ -123,17 +166,17 @@ def init_dungeon_run(level_name, total_enemies, user_id=None):
 
 def reset_dungeon_run(level_name, user_id=None):
     """Recompute total enemies for a dungeon and reset kill tracking + rewards."""
+    total_enemies = _count_trackable_dungeon_enemies_from_json(level_name)
+
+    # 2. Reset flags in server entities if any
     level_map = GS.level_entities.get(level_name, {})
-    total_enemies = 0
     for ent in level_map.values():
         if ent.get("kind") != "npc":
             continue
         props = ent.get("props", {})
         if props.get("team") == 2:
-            total_enemies += 1
-            # Reset per-run flags
+            # We don't add to total_enemies here since JSON is the source of truth for completion.
             props["rewards_granted"] = False
-            # Reset HP if max known
             if "max_hp" in props:
                 props["hp"] = props["max_hp"]
 
@@ -687,15 +730,38 @@ def send_admin_chat(msg, targets=None):
     for sess in targets:
             sess.conn.sendall(pkt)
 
-def send_room_boss_info(session, boss_id, boss_name):
+def _resolve_room_id(session, room_id=None):
+    if room_id is None:
+        room_id = getattr(session, "current_room_id", 0)
+    try:
+        value = int(room_id)
+    except Exception:
+        value = 0
+    return max(0, value)
+
+
+def send_room_sound(session, sound_name: str, volume: float = 1.0, room_id=None):
+    """Send PKTTYPE_PLAY_SOUND (0xA8) to players in the same level."""
+    bb = BitBuffer()
+    bb.write_method_4(_resolve_room_id(session, room_id))
+    bb.write_method_13(sound_name or "")
+    bb.write_method_4(max(0, min(100, int(round(float(volume) * 100)))))
+    body = bb.to_bytes()
+    pkt = struct.pack(">HH", 0xA8, len(body)) + body
+
+    level = session.current_level
+    for other in all_sessions:
+        if other.player_spawned and other.current_level == level:
+            other.conn.sendall(pkt)
+
+
+def send_room_boss_info(session, boss_id, boss_name, room_id=None):
     """
     Sends Packet 0xAC (PKTTYPE_ROOM_BOSS_INFO) to trigger Boss UI (Health Bar).
     Structure: [room_id:4][boss1_id:4][boss1_name:str][boss2_id:4][boss2_name:str]
     """
     bb = BitBuffer()
-    # Room ID: usually 0 or matched to current room index. 
-    # If unknown, 0 might work for single-room dungeons or current active view.
-    bb.write_method_4(0) 
+    bb.write_method_4(_resolve_room_id(session, room_id))
     
     bb.write_method_4(boss_id)
     bb.write_method_26(boss_name)
@@ -713,4 +779,7 @@ def send_room_boss_info(session, boss_id, boss_name):
         if other.player_spawned and other.current_level == level:
              other.conn.sendall(pkt)
     
-    print(f"[BOSS UI] Sent 0xAC for {boss_name} ({boss_id}) in {level}")
+    print(
+        f"[BOSS UI] Sent 0xAC room={_resolve_room_id(session, room_id)} "
+        f"boss={boss_name} ({boss_id}) level={level}"
+    )

@@ -88,6 +88,18 @@ def build_gear_change_packet(entity_id: int, equipped_gears: list[dict]) -> byte
     payload = bb.to_bytes()
     return struct.pack(">HH", 0xAF, len(payload)) + payload
 
+
+def _send_dungeon_mission_complete_ui(session, mission_id: int, stars: int = 3, score: int = 0):
+    """Send 0x84 mission completion panel for dungeon missions."""
+    bb = BitBuffer()
+    bb.write_method_4(int(mission_id))
+    bb.write_method_11(True, 1)  # dungeon mission (boolean = 1 bit)
+    bb.write_method_6(max(0, min(15, int(stars))), 4)
+    bb.write_method_4(max(0, int(score)))
+    payload = bb.to_bytes()
+    session.conn.sendall(struct.pack(">HH", 0x84, len(payload)) + payload)
+
+
 def broadcast_gear_change(session, all_sessions):
     char = session.current_char_dict
     if not char:
@@ -162,14 +174,16 @@ def handle_entity_destroy(session, data):
 
     level = session.current_level
     # remove from this session
-    session.entities.pop(entity_id, None)
+    destroyed_entity = session.entities.pop(entity_id, None) or {}
 
     # If this was the client’s own entity, clear reference
     if session.clientEntID == entity_id:
         session.clientEntID = None
 
     level_map = GS.level_entities.get(level)
+    destroyed_level_entry = None
     if level_map and entity_id in level_map:
+        destroyed_level_entry = level_map.get(entity_id)
         del level_map[entity_id]
         # print(f"[DESTROY] Entity {entity_id} removed from level {level}")
 
@@ -198,6 +212,36 @@ def handle_entity_destroy(session, data):
             # Backup: Trigger on Parrot (ID: 3333726)
             pkt2 = build_start_skit_packet(3333726, dialogue_id=2, mission_id=101)
             session.conn.sendall(pkt2)
+
+    # CraftTownTutorial: Keep clearing for "I Claim This Keep" (mission 5)
+    if session.current_level == "CraftTownTutorial":
+        # Determine destroyed entity name before it is removed from all caches.
+        ent_name = destroyed_entity.get("ent_name") or destroyed_entity.get("name", "")
+        if not ent_name and isinstance(destroyed_level_entry, dict):
+            props = destroyed_level_entry.get("props", {}) if isinstance(destroyed_level_entry, dict) else {}
+            ent_name = props.get("name", "")
+
+        state = getattr(session, "keep_tutorial_state", None)
+        if not isinstance(state, dict):
+            state = {"phase": 0, "boss_defeated": False}
+            session.keep_tutorial_state = state
+
+        if (
+            state.get("server_fallback")
+            and entity_id == state.get("fallback_last_guy_id")
+            and not state.get("fallback_intro_started")
+        ):
+            from login import maybe_start_crafttown_tutorial_fallback_intro
+
+            maybe_start_crafttown_tutorial_fallback_intro(session)
+
+        if ent_name in ("GoblinShamanHood", "IntroGoblinShamanHood"):
+            state["boss_defeated"] = True
+            print(f"[{session.addr}] [CraftTownTutorial] Ranik, The Geomancer destroyed.")
+            if state.get("server_fallback"):
+                from login import cleanup_crafttown_tutorial_fallback
+
+                cleanup_crafttown_tutorial_fallback(session)
 
 def handle_buff_tick_dot(session, data):
     br = BitReader(data[4:])
@@ -381,6 +425,7 @@ def handle_power_hit(session, data):
         # print(f"[Combat] Entity {target_entity_id} HP: {current_hp} -> {new_hp}")
 
     ent_name = target.get("name") if target else "Unknown"
+
     # Trigger reward ONLY on lethal damage and if not already granted
     # NOTE: target is None for client-spawned mobs — rewards for those go through
     # handle_grant_reward in Commands.py, so we skip this block entirely.
@@ -409,7 +454,12 @@ def handle_power_hit(session, data):
             # Track dungeon kill progress
             progress = None
             if not is_treasure_chest:
-                progress = record_dungeon_kill(level, target_entity_id, user_id=session.user_id)
+                progress = record_dungeon_kill(
+                    level,
+                    target_entity_id,
+                    user_id=session.user_id,
+                    npc_props=target,
+                )
             if progress:
                 for s in GS.all_sessions:
                     if s.player_spawned and s.current_level == level:
@@ -418,7 +468,11 @@ def handle_power_hit(session, data):
                             s.current_char_dict["questTrackerState"] = progress["percent"]
                             
                             # Auto-complete dungeon missions when 100% cleared
-                            if progress["percent"] >= 100:
+                            crafttown_ready = (
+                                level != "CraftTownTutorial"
+                                or bool((getattr(s, "keep_tutorial_state", {}) or {}).get("boss_defeated"))
+                            )
+                            if progress["percent"] >= 100 and crafttown_ready:
                                 from Commands import _set_mission_state, _persist_char_missions
                                 from globals import send_mission_complete
                                 from constants import Mission
@@ -434,6 +488,12 @@ def handle_power_hit(session, data):
                                                 _set_mission_state(char, mid, Mission.const_72)
                                                 _persist_char_missions(s, char)
                                                 send_mission_complete(s, mid)
+                                                _send_dungeon_mission_complete_ui(
+                                                    s,
+                                                    mid,
+                                                    stars=3,
+                                                    score=progress.get("kills", 0),
+                                                )
                                                 print(f"[Combat] Dungeon {level} 100% cleared! Auto-completed Mission {mid} for {char.get('name')}")
                                                 
                                                 # Optional: Do we send 0x84 here? The boss kill might trigger a UI element?

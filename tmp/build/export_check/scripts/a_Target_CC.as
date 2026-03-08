@@ -1,0 +1,15 @@
+package
+{
+   import flash.display.MovieClip;
+   
+   [Embed(source="/_assets/assets.swf", symbol="symbol2356")]
+   public dynamic class a_Target_CC extends MovieClip
+   {
+      
+      public function a_Target_CC()
+      {
+         super();
+      }
+   }
+}
+

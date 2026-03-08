@@ -8,7 +8,7 @@ from accounts import load_characters, save_characters
 from WorldEnter import build_enter_world_packet
 from bitreader import BitReader
 from constants import door, class_119, Entity, _load_json
-from globals import send_admin_chat, handle_entity_destroy_server, all_sessions, GS, PORTS, HOST
+from globals import send_admin_chat, handle_entity_destroy_server, all_sessions, GS, PORTS, HOST, send_hp_update
 
 DATA_DIR = "data"
 
@@ -584,6 +584,169 @@ def send_room_event_start(session, room_id, flag):
     session.conn.sendall(pkt)
 
 
+def _find_intro_parrot_by_target_x(level_name: str, target_x: int):
+    level_map = GS.level_entities.get(level_name, {})
+    best_id = None
+    best_dist = None
+    for eid, ent in level_map.items():
+        props = ent.get("props", {}) if isinstance(ent, dict) else {}
+        if props.get("name") != "IntroParrot":
+            continue
+        px = int(props.get("x", props.get("pos_x", 0)))
+        dist = abs(px - int(target_x))
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_id = eid
+    return best_id
+
+
+def _find_nearest_session_entity(
+    session,
+    names: set[str] | None,
+    ref_x: float,
+    ref_y: float,
+    cue_names: set[str] | None = None,
+):
+    best_id = None
+    best_dist = None
+    for eid, props in (getattr(session, "entities", {}) or {}).items():
+        if not isinstance(props, dict):
+            continue
+        ent_name = str(props.get("name", ""))
+        cue_data = props.get("cue_data", {}) if isinstance(props.get("cue_data"), dict) else {}
+        cue_name = str(cue_data.get("character_name", ""))
+        if names and ent_name not in names:
+            continue
+        if cue_names and cue_name not in cue_names:
+            continue
+        ex = float(props.get("pos_x", props.get("x", 0)))
+        ey = float(props.get("pos_y", props.get("y", 0)))
+        dist = abs(ex - ref_x) + abs(ey - ref_y)
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_id = int(eid)
+    return best_id, best_dist
+
+
+def _select_crafttown_tutorial_last_guy_id(session) -> int | None:
+    best_id = None
+    best_x = None
+
+    for eid, props in (getattr(session, "entities", {}) or {}).items():
+        if not isinstance(props, dict):
+            continue
+        if str(props.get("name", "")) != "GoblinDagger":
+            continue
+
+        cue_data = props.get("cue_data", {}) if isinstance(props.get("cue_data"), dict) else {}
+        cue_name = str(cue_data.get("character_name", "") or "")
+        if cue_name == "am_LastGuy":
+            return int(eid)
+
+        drama_anim = str(cue_data.get("DramaAnim", "") or props.get("DramaAnim", "") or "")
+        sleep_anim = str(cue_data.get("SleepAnim", "") or props.get("SleepAnim", "") or "")
+        ent_state = int(props.get("entState", props.get("ent_state", 0)) or 0)
+        if drama_anim == "Board" or ent_state == 2 or sleep_anim:
+            continue
+
+        x = float(props.get("pos_x", props.get("x", 0)))
+        if best_x is None or x > best_x:
+            best_x = x
+            best_id = int(eid)
+
+    return best_id
+
+
+def _trigger_crafttown_tutorial_boss_intro(session, state: dict, new_x: float) -> None:
+    if state.get("boss_intro_forced") or state.get("boss_defeated"):
+        return
+    if state.get("server_fallback"):
+        return
+
+    last_guy_id = _select_crafttown_tutorial_last_guy_id(session)
+    if last_guy_id is None:
+        return
+
+    send_hp_update(session, last_guy_id, -999999)
+
+    ent = session.entities.get(last_guy_id)
+    if isinstance(ent, dict):
+        ent["ent_state"] = 6
+        ent["entState"] = 6
+        ent["dead"] = True
+        ent["hp"] = 0
+        ent["rewards_granted"] = False
+
+    level_map = GS.level_entities.get(getattr(session, "current_level", ""), {})
+    level_entry = level_map.get(last_guy_id, {}) if isinstance(level_map, dict) else {}
+    level_props = level_entry.get("props", {}) if isinstance(level_entry, dict) else {}
+    if isinstance(level_props, dict):
+        level_props["ent_state"] = 6
+        level_props["entState"] = 6
+        level_props["dead"] = True
+        level_props["hp"] = 0
+        level_props["rewards_granted"] = False
+
+    handle_entity_destroy_server(session, last_guy_id, all_sessions)
+
+    state["phase"] = 3
+    state["boss_intro_forced"] = True
+    state["forced_last_guy_id"] = last_guy_id
+    print(f"[{session.addr}] [CraftTownTutorial] Forced am_LastGuy death ({last_guy_id}) for boss intro.")
+
+
+def _trigger_crafttown_tutorial_parrot(session, new_x: float):
+    state = getattr(session, "keep_tutorial_state", None)
+    if not isinstance(state, dict):
+        return
+
+    phase = int(state.get("phase", 0))
+    target_x = None
+    next_phase = phase
+    player = session.entities.get(session.clientEntID, {}) if getattr(session, "clientEntID", None) is not None else {}
+    player_x = float(player.get("pos_x", player.get("x", new_x)))
+    player_y = float(player.get("pos_y", player.get("y", 0)))
+
+    # Approximate original cue chain by triggering parrot skits as players
+    # advance deeper into the keep.
+    if phase < 1 and new_x <= -900:
+        target_x = -965
+        next_phase = 1
+    elif phase < 2 and new_x <= -2400:
+        target_x = -2627
+        next_phase = 2
+    elif phase < 3:
+        oldman_id, oldman_dist = _find_nearest_session_entity(
+            session,
+            {"NPCHomeGemMerchant"},
+            player_x,
+            player_y,
+        )
+        reached_boss_trigger = (
+            new_x <= -3200
+            or (
+                phase >= 2
+                and oldman_id is not None
+                and (oldman_dist or 0) <= 700
+            )
+        )
+        if reached_boss_trigger:
+            _trigger_crafttown_tutorial_boss_intro(session, state, new_x)
+        return
+
+    if target_x is None:
+        return
+
+    parrot_id = _find_intro_parrot_by_target_x("CraftTownTutorial", target_x)
+    if not parrot_id:
+        return
+
+    from globals import build_start_skit_packet
+
+    pkt = build_start_skit_packet(parrot_id, dialogue_id=0, mission_id=5)
+    session.conn.sendall(pkt)
+    state["phase"] = next_phase
+
 def handle_entity_incremental_update(session, data):
     payload = data[4:]
     br = BitReader(payload)
@@ -650,6 +813,9 @@ def handle_entity_incremental_update(session, data):
                         char["CurrentLevel"]["x"] = new_x
                         char["CurrentLevel"]["y"] = new_y
                     break
+
+        if curr_level == "CraftTownTutorial":
+            _trigger_crafttown_tutorial_parrot(session, new_x)
 
     for other in GS.all_sessions:
         if other is not session and other.player_spawned and other.current_level == session.current_level:

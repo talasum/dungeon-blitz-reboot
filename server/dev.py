@@ -16,6 +16,15 @@ this why i decided to stop here
 Note : attempting to change levels will break the game also attempting to use any of the buildings in "CraftTown" wont work
 """
 
+
+def _cache_room_id(session, room_id):
+    try:
+        rid = int(room_id)
+    except Exception:
+        return
+    if rid >= 0:
+        session.current_room_id = rid
+
 def build_fake_login_packet(token):
     bb = BitBuffer()
     bb.write_method_9(token)
@@ -50,6 +59,26 @@ def handle_quest_progress_update(session, data):
             other.conn.sendall(data)
 
 
+def handle_zone_enter(session, data):
+    br = BitReader(data[4:])
+    room_id = br.read_method_9()
+    _cache_room_id(session, room_id)
+
+    if session.current_level == "CraftTownTutorial":
+        started_ids = getattr(session, "_keep_room_events_started", None)
+        if started_ids is None:
+            started_ids = set()
+            session._keep_room_events_started = started_ids
+
+        if room_id not in started_ids:
+            try:
+                from level_config import send_room_event_start
+                send_room_event_start(session, room_id, True)
+            except Exception:
+                pass
+            started_ids.add(room_id)
+
+
 def handle_level_state(session, data):
     br = BitReader(data[4:])
     state_a = br.read_method_26()
@@ -65,9 +94,10 @@ def handle_level_state(session, data):
 
 def handle_play_sound(session, data):
     br = BitReader(data[4:])
-    room_id = br.read_method_4()
+    room_id = br.read_method_9()
+    _cache_room_id(session, room_id)
     sound_name = br.read_method_26()
-    volume_scaled = br.read_method_4()
+    volume_scaled = br.read_method_9()
     volume = volume_scaled / 100.0
     #print(f" PlaySound room={room_id} sound='{sound_name}' volume={volume}")
     for other in GS.all_sessions:
@@ -80,8 +110,9 @@ def handle_play_sound(session, data):
 
 def handle_action_update(session, data):
     br = BitReader(data[4:])
-    room_id = br.read_method_4()
-    action_id = br.read_method_4()
+    room_id = br.read_method_9()
+    _cache_room_id(session, room_id)
+    action_id = br.read_method_9()
     #print(f" ActionUpdate room={room_id} action={action_id}")
     for other in GS.all_sessions:
         if (
@@ -93,7 +124,8 @@ def handle_action_update(session, data):
 
 def handle_emote(session, data):
     br = BitReader(data[4:])
-    room_id = br.read_method_4()
+    room_id = br.read_method_9()
+    _cache_room_id(session, room_id)
     actor_name = br.read_method_26()
     emote_name = br.read_method_26()
     loop_flag = br.read_method_15()
@@ -112,8 +144,9 @@ def handle_emote(session, data):
 
 def handle_room_state_update(session, data):
     br = BitReader(data[4:])
-    room_id = br.read_method_4()
-    room_state = br.read_method_4()
+    room_id = br.read_method_9()
+    _cache_room_id(session, room_id)
+    room_state = br.read_method_9()
     #print(f" RoomStateUpdate room={room_id} state={room_state}")
     for other in GS.all_sessions:
         if (
@@ -125,7 +158,8 @@ def handle_room_state_update(session, data):
 
 def handle_room_event_start(session, data):
     br = BitReader(data[4:])
-    room_id = br.read_method_4()
+    room_id = br.read_method_9()
+    _cache_room_id(session, room_id)
     flag = br.read_method_15()
     #print(f" RoomEventStart room={room_id} flag={flag}")
     for other in GS.all_sessions:
@@ -138,10 +172,11 @@ def handle_room_event_start(session, data):
 
 def handle_room_info_update(session, data):
     br = BitReader(data[4:])
-    room_id = br.read_method_4()
-    info_a = br.read_method_4()
+    room_id = br.read_method_9()
+    _cache_room_id(session, room_id)
+    info_a = br.read_method_9()
     info_b = br.read_method_26()
-    info_c = br.read_method_4()
+    info_c = br.read_method_9()
     info_d = br.read_method_26()
     #print(
     #    f"RoomInfoUpdate room={room_id} "
@@ -173,7 +208,8 @@ def handle_set_untargetable(session, data):
 
 def handle_room_close(session, data):
     br = BitReader(data[4:])
-    room_id = br.read_method_4()
+    room_id = br.read_method_9()
+    _cache_room_id(session, room_id)
     #print(f"RoomClose / Reset room={room_id}")
     for other in GS.all_sessions:
         if (
@@ -186,7 +222,8 @@ def handle_room_close(session, data):
 
 def handle_room_unlock(session, data):
     br = BitReader(data[4:])
-    room_id = br.read_method_4()
+    room_id = br.read_method_9()
+    _cache_room_id(session, room_id)
     #print(f"RoomUnlock room={room_id}")
     for other in GS.all_sessions:
         if (
@@ -200,10 +237,11 @@ def handle_room_unlock(session, data):
 def handle_room_boss_info(session, data):
     br = BitReader(data[4:])
 
-    room_id    = br.read_method_4()
-    boss1_id   = br.read_method_4()
+    room_id    = br.read_method_9()
+    _cache_room_id(session, room_id)
+    boss1_id   = br.read_method_9()
     boss1_name = br.read_method_26()
-    boss2_id   = br.read_method_4()
+    boss2_id   = br.read_method_9()
     boss2_name = br.read_method_26()
 
     #print(

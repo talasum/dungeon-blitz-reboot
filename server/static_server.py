@@ -1,6 +1,7 @@
 import threading
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
+from console_control import console_output_enabled
 from globals import PORT_HTTP, HOST
 
 def start_static_server(
@@ -33,8 +34,10 @@ def start_static_server(
             self.send_header("Access-Control-Allow-Origin", "*")
             super().end_headers()
 
-        #def log_message(self, format, *args):
-            #return
+        def log_message(self, format, *args):
+            if not console_output_enabled():
+                return
+            super().log_message(format, *args)
 
     httpd = ThreadingHTTPServer((host, port), FlashSafeHandler)
 

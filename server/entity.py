@@ -463,7 +463,13 @@ def handle_entity_full_update(session, data):
     cue_data = {}
     if has_cue:
         if bool(br.read_method_15()):
-            cue_data["character_name"] = br.read_method_13()
+            cname = br.read_method_13()
+            cue_data["character_name"] = cname
+            # DB specific: if character_name starts with a comma, it overrides the entity type
+            if cname.startswith(","):
+                override_name = cname[1:]
+                if override_name:
+                    ent_name = override_name
         if bool(br.read_method_15()):
             cue_data["DramaAnim"] = br.read_method_13()
         if bool(br.read_method_15()):
@@ -570,22 +576,65 @@ def handle_entity_full_update(session, data):
     ent_name = props.get("name", f"Entity_{entity_id}")
     
     if not is_player:
+        session.client_spawn_confirmed = True
         print(f"[{session.addr}] [PKT08] Client-spawn NPC detected in {session.current_level}: {ent_name} ({entity_id})")
         
         # Check if Boss to trigger UI
         from game_data import get_ent_type
-        from globals import send_room_boss_info
+        from globals import send_room_boss_info, send_room_sound
         
         ety = get_ent_type(ent_name)
-        if ety:
-            rank = ety.get("EntRank")
-            # Trigger for Bosses (and maybe MiniBosses if desired, but user said Boss level)
-            if rank == "Boss":
-                # Send EntName (Internal ID) so client can find the asset/head icon.
-                # Sending DisplayName ("The Great Pumpkin") likely fails asset lookup -> 0x0 Bitmap -> Crash #2015
-                send_room_boss_info(session, entity_id, ent_name)
+        rank = ety.get("EntRank") if ety else None
+        is_rank_boss = rank == "Boss"
+        is_keep_boss = (
+            session.current_level == "CraftTownTutorial"
+            and ent_name in {"GoblinShamanHood", "IntroGoblinShamanHood"}
+        )
+
+        sent_ids = getattr(session, "_boss_info_sent_ids", None)
+        if sent_ids is None:
+            sent_ids = set()
+            session._boss_info_sent_ids = sent_ids
+
+        if is_keep_boss:
+            state = getattr(session, "keep_tutorial_state", None)
+            if isinstance(state, dict):
+                state["boss_entity_seen"] = entity_id
+                state["boss_entity_source"] = "client"
+
+        if (is_rank_boss or is_keep_boss) and entity_id not in sent_ids:
+            boss_name = "Ranik, The Geomancer" if is_keep_boss else ent_name
+            send_room_boss_info(
+                session,
+                entity_id,
+                boss_name,
+                room_id=getattr(session, "current_room_id", 0),
+            )
+            sent_ids.add(entity_id)
+
+            if is_keep_boss and not getattr(session, "_keep_boss_music_started", False):
+                send_room_sound(
+                    session,
+                    "D02_MoodLoop_GoblinHideout",
+                    0.9,
+                    room_id=getattr(session, "current_room_id", 0),
+                )
+                session._keep_boss_music_started = True
 
     session.entities[entity_id] = props
+
+    if (
+        not is_player
+        and session.current_level == "CraftTownTutorial"
+        and ent_name == "IntroParrot"
+        and not getattr(session, "_keep_intro_skit_sent", False)
+    ):
+        try:
+            from globals import build_start_skit_packet
+            session.conn.sendall(build_start_skit_packet(entity_id, dialogue_id=0, mission_id=5))
+            session._keep_intro_skit_sent = True
+        except Exception:
+            pass
 
     if entity_id == session.clientEntID:
         max_hp = int(getattr(session, "authoritative_max_hp", 0) or 0)
@@ -762,8 +811,13 @@ def normalize_entity_for_send(entity: dict) -> dict:
     cue = entity.get("cue_data", {})
     if cue:
         for key in ("character_name", "DramaAnim", "SleepAnim"):
-            if key in cue and cue[key]:
-                out[key] = cue[key]
+            val = cue.get(key)
+            if val:
+                out[key] = val
+                if key == "character_name" and val.startswith(","):
+                    override_name = val[1:]
+                    if override_name:
+                        out["name"] = override_name
 
     out.setdefault("character_name", "")
     out.setdefault("DramaAnim", "")

@@ -296,7 +296,8 @@ QUEST_MISSION_NAMED_DIALOG_TEMPLATES = [
 
 # ── Mission runtime helpers (Newbie Road chain) ──
 
-EARLY_STORY_MISSION_IDS = set(range(1, 9))  # DefendTheShip .. DeliverToSwamp
+# Include mission 271 (GoblinRiver) because it bridges mission 5 -> mission 6.
+EARLY_STORY_MISSION_IDS = set(range(1, 9)) | {271}
 
 
 def _get_char_missions(char: dict) -> dict:
@@ -403,7 +404,7 @@ def _get_mission_prereq_ids(mission_id: int) -> list[int]:
 def _can_start_mission(char: dict, mission_id: int) -> bool:
     """
     Check whether all prerequisite missions (if any) are completed.
-    Currently scoped to the early Newbie Road story chain (IDs 1–8).
+    Scoped to the early Newbie Road story chain (IDs 1–8 + 271 bridge).
     """
     if mission_id not in EARLY_STORY_MISSION_IDS:
         return True
@@ -1395,12 +1396,24 @@ def handle_set_level_complete(session, data):
     pkt_level_width_score  = br.read_method_9()
 
     # Calculate actual kills using authoritative server dungeon tracker when available
-    run = GS.dungeon_runs.get(session.current_level)
+    run_key = (session.current_level, session.user_id) if session.user_id else session.current_level
+    run = GS.dungeon_runs.get(run_key) or GS.dungeon_runs.get(session.current_level)
     if run:
         actual_kills = run.get("killed", 0)
+        actual_total = run.get("total", 0)
     else:
         # Fallback to client-reported values
         actual_kills = pkt_required_kills - pkt_remaining_kills
+        actual_total = pkt_required_kills
+
+    if run and actual_total:
+        cleared_dungeon = actual_kills >= actual_total
+    else:
+        # Fallback for cases where the tracker is unavailable.
+        cleared_dungeon = (
+            int(pkt_completion_percent) >= 100
+            or (int(pkt_required_kills) > 0 and int(pkt_remaining_kills) <= 0)
+        )
 
     # Check for any active mission that relies on this dungeon to complete
     char = session.current_char_dict or {}
@@ -1408,29 +1421,34 @@ def handle_set_level_complete(session, data):
     from globals import send_mission_complete
     
     completed_mission_id = None
-    for mid_str, mdata in player_missions.items():
-        if mdata.get("state") == Mission.const_58:  # In progress
-            try:
-                mid = int(mid_str)
-            except:
-                continue
-            
-            # Use get_mission_def to check if this mission's Dungeon matches
-            from missions import get_mission_def
-            mdef = get_mission_def(mid)
-            if mdef.get("Dungeon") == session.current_level:
-                # Complete the dungeon mission
-                _set_mission_state(char, mid, Mission.const_72)
-                _persist_char_missions(session, char)
-                completed_mission_id = mid
-                send_mission_complete(session, mid)
-                break
+    crafttown_ready = (
+        session.current_level != "CraftTownTutorial"
+        or bool((getattr(session, "keep_tutorial_state", {}) or {}).get("boss_defeated"))
+    )
+    if cleared_dungeon and crafttown_ready:
+        for mid_str, mdata in player_missions.items():
+            if mdata.get("state") == Mission.const_58:  # In progress
+                try:
+                    mid = int(mid_str)
+                except:
+                    continue
+
+                # Use get_mission_def to check if this mission's Dungeon matches
+                from missions import get_mission_def
+                mdef = get_mission_def(mid)
+                if mdef.get("Dungeon") == session.current_level:
+                    # Complete the dungeon mission
+                    _set_mission_state(char, mid, Mission.const_72)
+                    _persist_char_missions(session, char)
+                    completed_mission_id = mid
+                    send_mission_complete(session, mid)
+                    break
 
     if completed_mission_id is not None:
         # Send 0x84 (Mission Complete UI) for the dungeon mission
-        bb = BitBuffer()
+        bb= BitBuffer()
         bb.write_method_4(completed_mission_id)
-        bb.write_method_11(True) # true if this is a dungeon
+        bb.write_method_11(1, 1) # true if this is a dungeon
         bb.write_method_6(pkt_level_width_score or 3, 4) # Stars
         bb.write_method_4(pkt_bonus_score_total) # Dungeon score
         payload = bb.to_bytes()
@@ -3076,6 +3094,52 @@ def handle_grant_reward(session, data):
     process_drop_reward(session, world_x, world_y, gold, hp_gain, drop_gear, material_id=material_id, gear_tier=gear_tier, specific_gear_id=specific_gear_id)
     
     print(f"Granted Reward Request for {source_id}: XP={exp}, Gold={gold}, Item={drop_gear}")
+
+    # Track dungeon kill progress
+    from globals import record_dungeon_kill, send_quest_progress
+    npc_for_progress = get_npc_props(session.current_level, source_id) or source_ent
+    progress = record_dungeon_kill(
+        session.current_level,
+        source_id,
+        user_id=session.user_id,
+        npc_props=npc_for_progress,
+    )
+    if progress:
+        send_quest_progress(session, progress["percent"])
+        if session.current_char_dict:
+            session.current_char_dict["questTrackerState"] = progress["percent"]
+            
+            # Auto-complete dungeon missions when 100% cleared
+            crafttown_ready = (
+                session.current_level != "CraftTownTutorial"
+                or bool((getattr(session, "keep_tutorial_state", {}) or {}).get("boss_defeated"))
+            )
+            if progress["percent"] >= 100 and crafttown_ready:
+                from globals import send_mission_complete
+                from constants import Mission
+                from missions import get_mission_def
+                
+                char = session.current_char_dict
+                for mid_str, mdata in char.get("missions", {}).items():
+                    if mdata.get("state") == Mission.const_58:
+                        try:
+                            mid = int(mid_str)
+                            mdef = get_mission_def(mid)
+                            if mdef.get("Dungeon") == session.current_level:
+                                _set_mission_state(char, mid, Mission.const_72)
+                                _persist_char_missions(session, char)
+                                send_mission_complete(session, mid)
+                                bb_done = BitBuffer()
+                                bb_done.write_method_4(mid)
+                                bb_done.write_method_11(True)  # dungeon mission
+                                bb_done.write_method_6(3, 4)   # stars
+                                bb_done.write_method_4(int(progress.get("kills", 0)))
+                                done_payload = bb_done.to_bytes()
+                                session.conn.sendall(struct.pack(">HH", 0x84, len(done_payload)) + done_payload)
+                                print(f"[Commands] Dungeon {session.current_level} 100% cleared! Auto-completed Mission {mid}")
+                        except Exception as e:
+                            print(f"[Commands] Error auto-completing dungeon: {e}")
+                            continue
 
 def process_drop_reward(
     session,

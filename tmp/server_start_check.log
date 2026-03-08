@@ -1,0 +1,17 @@
+[Policy] Fatal error: [Errno 13] Permission denied
+Traceback (most recent call last):
+  File "/Users/neodevils/Documents/GitHub/dungeon-blitz-flash-reboot/server/server.py", line 471, in <module>
+    start_static_server(host="127.0.0.1", port=80, directory="content/localhost")
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/neodevils/Documents/GitHub/dungeon-blitz-flash-reboot/server/static_server.py", line 39, in start_static_server
+    httpd = ThreadingHTTPServer((host, port), FlashSafeHandler)
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/socketserver.py", line 457, in __init__
+    self.server_bind()
+    ~~~~~~~~~~~~~~~~^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/http/server.py", line 136, in server_bind
+    socketserver.TCPServer.server_bind(self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/socketserver.py", line 478, in server_bind
+    self.socket.bind(self.server_address)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+PermissionError: [Errno 13] Permission denied

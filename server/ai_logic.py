@@ -546,6 +546,9 @@ def run_ai_loop(level_name):
             # Client-spawned entities are controlled by SWF logic, not server AI.
             if npc.get("client_spawned", False):
                 continue
+            # Cutscene/drama-state NPCs should not aggro or attack until activated.
+            if int(npc.get("entState", 0)) == 2 or npc.get("untargetable", False):
+                continue
 
             # Skip TreasureChest and stationary/non-combat entities from AI loop
             ent_name = npc.get("name", "")
