@@ -150,6 +150,12 @@ def load_npc_data_for_level(level_name: str) -> list:
             baked_npcs = {"IntroParrot", "NPCCaptainSteering"}
             data = [npc for npc in data if npc.get("name") not in baked_npcs]
 
+        # TutorialDungeon carries its own parrot and password goblin cues inside
+        # the room scripts. Keep Anna server-side, but do not double-spawn these.
+        if level_name == "TutorialDungeon":
+            baked_npcs = {"IntroParrot", "IntroGoblinNPC"}
+            data = [npc for npc in data if npc.get("name") not in baked_npcs]
+
         return data
     except (FileNotFoundError, json.JSONDecodeError) as e:
         print(f"Error loading NPC data for {level_name}: {e}")
@@ -605,8 +611,15 @@ def handle_entity_full_update(session, data):
         if is_keep_boss:
             state = getattr(session, "keep_tutorial_state", None)
             if isinstance(state, dict):
+                fallback_boss_id = state.get("fallback_boss_id")
                 state["boss_entity_seen"] = entity_id
                 state["boss_entity_source"] = "client"
+                if fallback_boss_id and int(fallback_boss_id) != int(entity_id):
+                    fallback_boss_id = int(fallback_boss_id)
+                    session.entities.pop(fallback_boss_id, None)
+                    from globals import build_destroy_entity_packet
+
+                    session.conn.sendall(build_destroy_entity_packet(fallback_boss_id))
 
         if (is_rank_boss or is_keep_boss) and entity_id not in sent_ids:
             boss_name = "Ranik, The Geomancer" if is_keep_boss else ent_name

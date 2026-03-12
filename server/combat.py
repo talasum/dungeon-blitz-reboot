@@ -343,7 +343,7 @@ def handle_power_hit(session, data):
     is_critical = br.read_method_15()
 
     # --- Server-Side Drop Logic ---
-    from Commands import process_drop_reward
+    from Commands import _resolve_loot_drop_position, process_drop_reward
     from game_data import calculate_npc_gold, calculate_npc_exp, get_ent_type, get_random_material_for_realm
     from game_data import calculate_npc_hp, calculate_npc_gold, get_ent_type, calculate_drop_data, get_gear_id_for_entity, get_random_gear_id
     from player_stats import calculate_find_bonuses, get_modified_gold, get_modified_drop_chance
@@ -489,6 +489,19 @@ def handle_power_hit(session, data):
                                                 _set_mission_state(char, mid, completion_state_for_objective(mid))
                                                 _persist_char_missions(s, char)
                                                 send_mission_complete(s, mid)
+                                                if mid == 3:
+                                                    _auto_accept_followup_mission = None
+                                                    try:
+                                                        from Commands import _auto_accept_followup_mission
+                                                    except Exception:
+                                                        _auto_accept_followup_mission = None
+                                                    if _auto_accept_followup_mission is not None:
+                                                        _auto_accept_followup_mission(
+                                                            s,
+                                                            char,
+                                                            "nranna03",
+                                                            exclude_mission_id=mid,
+                                                        )
                                                 _send_dungeon_mission_complete_ui(
                                                     s,
                                                     mid,
@@ -622,10 +635,11 @@ def handle_power_hit(session, data):
             # Spawn loot drops for both dungeon and non-dungeon kills
             death_x = int(round(target.get("pos_x", target.get("x", 0))))
             death_y = int(round(target.get("pos_y", target.get("y", 0))))
+            drop_x, drop_y = _resolve_loot_drop_position(session, target, death_x, death_y)
             process_drop_reward(
                 session,
-                death_x,
-                death_y,
+                drop_x,
+                drop_y,
                 gold=gold_amount,
                 hp_gain=hp_gain,
                 drop_gear=should_drop_gear,

@@ -776,6 +776,11 @@ def _trigger_crafttown_tutorial_boss_intro(session, state: dict, new_x: float) -
     state["phase"] = 3
     state["boss_intro_forced"] = True
     state["forced_last_guy_id"] = last_guy_id
+    try:
+        from login import arm_crafttown_tutorial_boss_recovery
+        arm_crafttown_tutorial_boss_recovery(session)
+    except Exception:
+        pass
     print(f"[{session.addr}] [CraftTownTutorial] Forced am_LastGuy death ({last_guy_id}) for boss intro.")
 
 

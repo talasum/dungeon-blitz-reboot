@@ -1425,6 +1425,16 @@ def handle_set_level_complete(session, data):
             session.current_char_dict["questTrackerState"] = 100
         send_quest_progress(session, 100)
 
+    # TutorialDungeon also relies heavily on client-scripted enemy/cinematic flow.
+    # If the client reached level-complete, the Anna rescue path already succeeded.
+    if session.current_level == "TutorialDungeon":
+        cleared_dungeon = True
+        actual_kills = max(actual_kills, actual_total, int(pkt_required_kills), 1)
+        actual_total = max(actual_total, int(pkt_required_kills), actual_kills)
+        if session.current_char_dict is not None:
+            session.current_char_dict["questTrackerState"] = 100
+        send_quest_progress(session, 100)
+
     # Check for any active mission that relies on this dungeon to complete
     char = session.current_char_dict or {}
     player_missions = char.get("missions", {})
@@ -1450,6 +1460,13 @@ def handle_set_level_complete(session, data):
                     _persist_char_missions(session, char)
                     completed_mission_id = mid
                     send_mission_complete(session, mid)
+                    if mid == 3:
+                        _auto_accept_followup_mission(
+                            session,
+                            char,
+                            _mission_npc_key("Anna"),
+                            exclude_mission_id=mid,
+                        )
                     break
 
     if completed_mission_id is not None:
@@ -1789,6 +1806,36 @@ def _mission_npc_key(value: str) -> str:
     return aliases.get(norm_value, norm_value)
 
 
+def _auto_accept_followup_mission(session, char: dict, npc_key: str, exclude_mission_id: int = 0) -> int:
+    if not npc_key:
+        return 0
+
+    from globals import send_mission_added
+    from missions import get_total_mission_defs
+
+    total_missions = get_total_mission_defs()
+    for mid in range(1, total_missions + 1):
+        if mid == exclude_mission_id or mid not in EARLY_STORY_MISSION_IDS:
+            continue
+        if _get_mission_state(char, mid) != Mission.const_213:
+            continue
+
+        mextra = get_mission_extra(mid)
+        if not mextra:
+            continue
+        if _mission_npc_key(mextra.get("ContactName")) != npc_key:
+            continue
+        if not _can_start_mission(char, mid):
+            continue
+
+        _set_mission_state(char, mid, Mission.const_58, curr_count=0)
+        _persist_char_missions(session, char)
+        send_mission_added(session, mid)
+        return mid
+
+    return 0
+
+
 def handle_power_use(session, data):
     br = BitReader(data[4:])
     power = br.read_method_20(PowerType.const_423)
@@ -2012,6 +2059,7 @@ def handle_talk_to_npc(session, data):
             _set_mission_state(char, mission_id, Mission.CLAIMED)
             _persist_char_missions(session, char)
             send_mission_complete(session, mission_id)
+            _auto_accept_followup_mission(session, char, mission_npc_norm, exclude_mission_id=mission_id)
 
     # Fallback: Bubble Chat if no mission dialogue is triggered
     if dialogue_id == 0:
@@ -2876,6 +2924,33 @@ def generate_loot_id():
     _last_loot_id += 1
     return _last_loot_id
 
+
+def _loot_source_props(source_ent):
+    if not isinstance(source_ent, dict):
+        return {}
+    props = source_ent.get("props")
+    if isinstance(props, dict):
+        return props
+    return source_ent
+
+
+def _resolve_loot_drop_position(session, source_ent, fallback_x, fallback_y):
+    props = _loot_source_props(source_ent)
+    x = int(round(props.get("pos_x", props.get("x", fallback_x))))
+    y = int(round(props.get("pos_y", props.get("y", fallback_y))))
+
+    ent_name = str(props.get("name", ""))
+    if ent_name:
+        from game_data import get_ent_type
+
+        ent_type = get_ent_type(ent_name) or {}
+        if str(ent_type.get("Flying", "")).lower() == "true":
+            player_ent = (getattr(session, "entities", {}) or {}).get(getattr(session, "clientEntID", 0), {}) or {}
+            ground_y = player_ent.get("pos_y", player_ent.get("y", y))
+            y = int(round(ground_y))
+
+    return x, y
+
 def handle_grant_reward(session, data):
     br = BitReader(data[4:])
 
@@ -2936,7 +3011,6 @@ def handle_grant_reward(session, data):
     
     from game_data import get_ent_type # ensure import available if not top-level
     
-    is_flying = False
     source_ent = None
     ent_name = None
     
@@ -2949,11 +3023,10 @@ def handle_grant_reward(session, data):
         source_ent = GS.level_npcs[session.current_level][source_id]
         
     ent_name = None
-    if source_ent:
-        ent_name = source_ent.get("name")
+    source_props = _loot_source_props(source_ent)
+    if source_props:
+        ent_name = source_props.get("name")
         ent_type_data = get_ent_type(ent_name) or {}
-        if ent_type_data.get("Flying") == "True":
-            is_flying = True
     else:
         ent_type_data = {}
 
@@ -3066,21 +3139,7 @@ def handle_grant_reward(session, data):
         print(f"[Loot Override] {receiver_id} killed {ent_name_lookup or 'Unknown'} (dungeon_lvl={dungeon_level}). Loot: XP={exp}, Gold={gold}, Item={drop_gear}, Material={material_id}")
         
     
-    if is_flying:
-        # Use player's X and Y coordinate (Gravity Fallback)
-        player_ent = session.entities.get(session.clientEntID)
-        if player_ent:
-            if "pos_y" in player_ent:
-                world_y = int(player_ent["pos_y"])
-            if "pos_x" in player_ent:
-                # Add a small random offset (30-60 pixels) so loot doesn't spawn *inside* the player
-                offset = random.choice([-1, 1]) * random.randint(30, 60)
-                world_x = int(player_ent["pos_x"]) + offset
-    else:
-        # Ground Mob: Trust the coordinates reported by client (matched to mob death)
-        if source_ent and "x" in source_ent and "y" in source_ent:
-             world_x = int(source_ent.get("pos_x", source_ent["x"]))
-             world_y = int(source_ent.get("pos_y", source_ent["y"]))
+    world_x, world_y = _resolve_loot_drop_position(session, source_ent, world_x, world_y)
 
     # ---------------------------------------------------------
     # APPLY XP REWARD (Critical for client-side mobs)

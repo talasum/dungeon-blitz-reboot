@@ -40,7 +40,7 @@ CLIENT_SPAWN_FALLBACK_SEC = 5.0
 KEEP_TUTORIAL_BOSS_NAMES = {"GoblinShamanHood", "IntroGoblinShamanHood"}
 KEEP_TUTORIAL_BOSS_DISPLAY_NAME = "Ranik, The Geomancer"
 KEEP_TUTORIAL_BOSS_SOUND = "D02_MoodLoop_GoblinHideout"
-KEEP_TUTORIAL_FALLBACK_BOSS_GRACE_SEC = 2.0
+KEEP_TUTORIAL_FALLBACK_PRESPAWN_GRACE_SEC = 0.25
 KEEP_TUTORIAL_FALLBACK_CUTSCENE_SEC = 5.9
 KEEP_TUTORIAL_FALLBACK_POST_CUTSCENE_DELAY_SEC = 5.0
 KEEP_TUTORIAL_FALLBACK_BOARDING_ANIM_SEC = 0.35
@@ -81,12 +81,244 @@ def _repair_stuck_tutorial_boat_mission(char: dict) -> bool:
     return True
 
 
+def _repair_stuck_tutorial_dungeon_mission(char: dict) -> bool:
+    current_level = str((char.get("CurrentLevel") or {}).get("name", ""))
+    if not current_level or current_level == "TutorialDungeon":
+        return False
+
+    mission3_state = get_mission_state(char, 3)
+    mission4_state = get_mission_state(char, 4)
+    if mission3_state == Mission.const_213 and mission4_state != Mission.const_213:
+        return False
+    if mission3_state not in (Mission.const_58, Mission.CLAIMED, Mission.const_72):
+        return False
+
+    missions = char.get("missions")
+    if not isinstance(missions, dict):
+        return False
+
+    changed = False
+    entry3 = missions.get("3")
+    if isinstance(entry3, dict) and mission3_state in (Mission.const_58, Mission.const_72):
+        entry3["state"] = Mission.CLAIMED
+        entry3["claimed"] = 1
+        entry3["complete"] = 1
+        changed = True
+
+    if mission4_state == Mission.const_213:
+        entry4 = dict(missions.get("4") or {})
+        entry4["state"] = Mission.const_58
+        entry4["currCount"] = 0
+        entry4.pop("claimed", None)
+        entry4.pop("complete", None)
+        missions["4"] = entry4
+        changed = True
+
+    if changed:
+        char["questTrackerState"] = 100
+        normalize_char_missions(char)
+    return changed
+
+
+def _repair_stuck_early_story_chain(char: dict) -> bool:
+    story_chain = [1, 2, 3, 4, 5, 6, 7, 8]
+    highest_started = 0
+    for mission_id in story_chain:
+        if get_mission_state(char, mission_id) != Mission.const_213:
+            highest_started = mission_id
+
+    if highest_started <= 1:
+        return False
+
+    missions = char.get("missions")
+    if not isinstance(missions, dict):
+        return False
+
+    changed = False
+    for mission_id in story_chain:
+        if mission_id >= highest_started:
+            break
+        state = get_mission_state(char, mission_id)
+        if state >= Mission.CLAIMED:
+            continue
+
+        entry = dict(missions.get(str(mission_id)) or {})
+        entry["state"] = Mission.CLAIMED
+        entry["claimed"] = 1
+        entry["complete"] = 1
+        missions[str(mission_id)] = entry
+        changed = True
+
+    if changed:
+        normalize_char_missions(char)
+    return changed
+
+
 def _ensure_keep_tutorial_state(session) -> dict:
     state = getattr(session, "keep_tutorial_state", None)
     if not isinstance(state, dict):
         state = {"phase": 0, "boss_defeated": False}
         session.keep_tutorial_state = state
     return state
+
+
+def _ensure_crafttown_tutorial_recovery_entities(level_map: dict) -> tuple[int | None, list[int]]:
+    def _drama_anim(props: dict) -> str:
+        cue = props.get("cue_data", {}) if isinstance(props.get("cue_data"), dict) else {}
+        return str(cue.get("DramaAnim", "") or props.get("DramaAnim", ""))
+
+    boss_present = any(
+        isinstance(ent, dict)
+        and isinstance(ent.get("props"), dict)
+        and ent["props"].get("name") in KEEP_TUTORIAL_BOSS_NAMES.union({"GoblinShamanHood"})
+        for ent in level_map.values()
+    )
+    helper_present = any(
+        isinstance(ent, dict)
+        and isinstance(ent.get("props"), dict)
+        and ent["props"].get("name") == "GoblinDagger"
+        and _drama_anim(ent["props"]) == "Board"
+        for ent in level_map.values()
+    )
+
+    if not boss_present or not helper_present:
+        json_path = os.path.join(os.path.dirname(__file__), "world_npcs", "CraftTownTutorial.json")
+        with open(json_path, "r") as file:
+            data = json.load(file)
+
+        for npc_template in data:
+            if int(npc_template.get("team", 0)) != 2:
+                continue
+
+            name = str(npc_template.get("name", ""))
+            drama_anim = str(npc_template.get("DramaAnim", ""))
+            needs_spawn = False
+            if not boss_present and name == "GoblinShamanHood":
+                needs_spawn = True
+                boss_present = True
+            elif not helper_present and name == "GoblinDagger" and drama_anim == "Board":
+                needs_spawn = True
+
+            if not needs_spawn:
+                continue
+
+            npc_id = allocate_entity_id()
+            npc = dict(npc_template)
+            npc["id"] = npc_id
+            npc.setdefault("x", npc.get("pos_x", npc.get("x", 0)))
+            npc.setdefault("y", npc.get("pos_y", npc.get("y", 0)))
+            npc["pos_x"] = npc.get("x", 0)
+            npc["pos_y"] = npc.get("y", 0)
+            _ensure_npc_cue_data(npc)
+            level_map[npc_id] = {
+                "id": npc_id,
+                "kind": "npc",
+                "session": None,
+                "props": npc,
+            }
+
+    _, boss_id, helper_ids = _prepare_crafttown_tutorial_fallback_entities(level_map)
+    return boss_id, helper_ids
+
+
+def arm_crafttown_tutorial_boss_recovery(session) -> None:
+    state = _ensure_keep_tutorial_state(session)
+    if state.get("boss_recovery_armed") or state.get("boss_defeated"):
+        return
+
+    state["boss_recovery_armed"] = True
+
+    def _worker():
+        level_name = session.current_level
+        time.sleep(KEEP_TUTORIAL_FALLBACK_PRESPAWN_GRACE_SEC)
+        if not getattr(session, "running", False):
+            return
+        if session.current_level != level_name or state.get("boss_defeated"):
+            return
+
+        boss_id = _ensure_crafttown_tutorial_boss_recovery_spawn(session, state)
+        if boss_id is None:
+            return
+
+        time.sleep(KEEP_TUTORIAL_FALLBACK_CUTSCENE_SEC + KEEP_TUTORIAL_FALLBACK_POST_CUTSCENE_DELAY_SEC)
+        if session.current_level != level_name or state.get("boss_defeated"):
+            return
+
+        boss_id = state.get("boss_entity_seen")
+        if boss_id is None:
+            return
+
+        level_map = GS.level_entities.get(level_name, {})
+        level_entry = level_map.get(boss_id, {}) if isinstance(level_map, dict) else {}
+        level_props = level_entry.get("props", {}) if isinstance(level_entry, dict) else {}
+        boss_props = (session.entities.get(boss_id) or level_props or {}).copy()
+        ent_state = int(boss_props.get("entState", boss_props.get("ent_state", 0)) or 0)
+        still_locked = bool(boss_props.get("untargetable", False)) or ent_state == 2
+
+        if state.get("boss_entity_source") == "fallback":
+            _activate_crafttown_tutorial_fallback_enemy(session, boss_id)
+            _start_crafttown_tutorial_fallback_waves(session, state)
+        elif still_locked:
+            _activate_crafttown_tutorial_fallback_enemy(session, boss_id)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _ensure_crafttown_tutorial_boss_recovery_spawn(session, state: dict) -> int | None:
+    boss_id = state.get("boss_entity_seen")
+    boss_source = state.get("boss_entity_source")
+    if boss_source == "client" and boss_id is not None:
+        return int(boss_id)
+
+    boss_id = state.get("fallback_boss_id")
+    level_name = session.current_level
+    level_map = GS.level_entities.setdefault(level_name, {})
+    if boss_id is None:
+        boss_id, helper_ids = _ensure_crafttown_tutorial_recovery_entities(level_map)
+        if boss_id is None:
+            return None
+        state["fallback_boss_id"] = boss_id
+        state["fallback_helper_ids"] = helper_ids
+    else:
+        helper_ids = list(state.get("fallback_helper_ids", []))
+
+    entry = level_map.get(boss_id, {})
+    boss = entry.get("props", {}) if isinstance(entry, dict) else {}
+    if not isinstance(boss, dict):
+        return None
+
+    if boss_id not in session.entities:
+        _session_send_npc_spawn(session, boss)
+
+    state["boss_entity_seen"] = boss_id
+    state["boss_entity_source"] = "fallback"
+    state["fallback_helper_ids"] = helper_ids
+
+    from globals import send_room_boss_info, send_room_sound
+
+    sent_ids = getattr(session, "_boss_info_sent_ids", None)
+    if sent_ids is None:
+        sent_ids = set()
+        session._boss_info_sent_ids = sent_ids
+    if boss_id not in sent_ids:
+        send_room_boss_info(
+            session,
+            boss_id,
+            KEEP_TUTORIAL_BOSS_DISPLAY_NAME,
+            room_id=getattr(session, "current_room_id", 0),
+        )
+        sent_ids.add(boss_id)
+
+    if not getattr(session, "_keep_boss_music_started", False):
+        send_room_sound(
+            session,
+            KEEP_TUTORIAL_BOSS_SOUND,
+            0.9,
+            room_id=getattr(session, "current_room_id", 0),
+        )
+        session._keep_boss_music_started = True
+
+    return int(boss_id)
 
 
 def _session_send_npc_spawn(session, npc: dict) -> None:
@@ -372,7 +604,7 @@ def maybe_start_crafttown_tutorial_fallback_intro(session) -> None:
     def _worker():
         level_name = session.current_level
         started_at = time.monotonic()
-        while time.monotonic() - started_at < KEEP_TUTORIAL_FALLBACK_BOSS_GRACE_SEC:
+        while time.monotonic() - started_at < KEEP_TUTORIAL_FALLBACK_PRESPAWN_GRACE_SEC:
             if not getattr(session, "running", False):
                 return
             if session.current_level != level_name or state.get("boss_defeated"):
@@ -381,36 +613,9 @@ def maybe_start_crafttown_tutorial_fallback_intro(session) -> None:
                 return
             time.sleep(0.1)
 
-        boss_id = state.get("fallback_boss_id")
+        boss_id = _ensure_crafttown_tutorial_boss_recovery_spawn(session, state)
         if boss_id is None:
             return
-
-        level_map = GS.level_entities.get(level_name, {})
-        entry = level_map.get(boss_id, {})
-        boss = entry.get("props", {}) if isinstance(entry, dict) else {}
-        if not isinstance(boss, dict):
-            return
-
-        _session_send_npc_spawn(session, boss)
-        state["boss_entity_seen"] = boss_id
-        state["boss_entity_source"] = "fallback"
-
-        from globals import send_room_boss_info, send_room_sound
-
-        send_room_boss_info(
-            session,
-            boss_id,
-            KEEP_TUTORIAL_BOSS_DISPLAY_NAME,
-            room_id=getattr(session, "current_room_id", 0),
-        )
-        if not getattr(session, "_keep_boss_music_started", False):
-            send_room_sound(
-                session,
-                KEEP_TUTORIAL_BOSS_SOUND,
-                0.9,
-                room_id=getattr(session, "current_room_id", 0),
-            )
-            session._keep_boss_music_started = True
 
         time.sleep(KEEP_TUTORIAL_FALLBACK_CUTSCENE_SEC)
         if session.current_level != level_name or state.get("boss_defeated"):
@@ -836,7 +1041,14 @@ def handle_gameserver_login(session, data):
     # Update session to point to the fresh character
     session.current_char_dict = char
     normalize_char_missions(session.current_char_dict)
+    repaired = False
     if _repair_stuck_tutorial_boat_mission(session.current_char_dict):
+        repaired = True
+    if _repair_stuck_tutorial_dungeon_mission(session.current_char_dict):
+        repaired = True
+    if _repair_stuck_early_story_chain(session.current_char_dict):
+        repaired = True
+    if repaired:
         save_characters(session.user_id, session.char_list)
     GS.pending_world.pop(token, None)
 
@@ -932,9 +1144,7 @@ def handle_gameserver_login(session, data):
         # Try triggering Room 0 and Room 1 to cover bases
         send_room_event_start(session, 0, True)
         send_room_event_start(session, 1, True)
-        # Send initial parrot dialogue (Pecky)
-        send_npc_dialog(session, 384606, "Squawk! Goblins! Goblins everywhere! Help Pecky!")
-        print(f"[{session.addr}] Sent Room Event Start and Parrot Chat for TutorialDungeon")
+        print(f"[{session.addr}] Sent Room Event Start for TutorialDungeon")
 
     # CraftTownTutorial (Keep clearing for "I Claim This Keep" / mission 5)
     if session.current_level == "CraftTownTutorial":

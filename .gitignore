@@ -7,3 +7,4 @@ server/Accounts.json
 server/Dungeon Blitz.exe
 server/favicon.ico
 server/launcher.py
+.DS_Store
